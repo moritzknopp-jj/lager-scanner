@@ -298,7 +298,7 @@ export function findIssues(products, log = []) {
   const reasons = {};
   const add = (code, why) => { (reasons[code] ||= []).push(why); };
   for (const p of live) {
-    const cp = codeProblem(p.ean);
+    const cp = p.codeOk ? '' : codeProblem(p.ean); // codeOk: odd code kept on purpose
     if (cp) add(p.ean, cp);
     const text = [p.name, p.maker, p.aiNote].join(' ');
     if (!p.name) add(p.ean, 'Kein Produktname');

@@ -194,3 +194,12 @@ describe('correction checks', () => {
     expect(findIssues({}, log).adjusts.map((e) => e.id)).toEqual(['a']);
   });
 });
+
+describe('codes kept on purpose', () => {
+  it('does not complain about a code marked as fine', () => {
+    const products = { '8032771': { ean: '8032771', name: 'Schlauchleitung', status: 'verified', codeOk: true }, '0099009101': { ean: '0099009101', name: 'LS', status: 'verified' } };
+    const r = findIssues(products, []).reasons;
+    expect(r['8032771']).toBeUndefined();
+    expect(r['0099009101'][0]).toMatch(/10 Ziffern/);
+  });
+});

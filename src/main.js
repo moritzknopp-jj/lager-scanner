@@ -587,7 +587,7 @@ function buildProposals(iss, fixes, merges) {
     for (const c of g) if (c !== keep) addMerge(c, keep, 'Gleicher Name bzw. gleiche Artikelnummer');
   }
   for (const c of Object.keys(iss.reasons)) {
-    const cp = live(c) && codeProblem(c);
+    const cp = live(c) && !S.products[c].codeOk && codeProblem(c);
     if (cp && !props.some((x) => x.type === 'recode' && x.code === c) && !props.some((x) => x.type === 'merge' && x.from === c)) props.push({ id: pid(), type: 'note', code: c, reason: cp + '. Bitte den echten Barcode scannen oder das Produkt zusammenführen.' });
   }
   for (const e of iss.adjusts) props.push({ id: pid(), type: 'adjust', entryId: e.id, code: e.e, q: e.q, t: e.t, reason: e.note || '' });
@@ -635,7 +635,11 @@ async function resolveProposals(ids, accept) {
   const chosen = list.filter((x) => ids.includes(x.id)).sort((a, b) => order[a.type] - order[b.type]);
   try {
     if (accept) for (const pr of chosen) { await applyProposal(pr); await reloadState(); }
-    else for (const pr of chosen) if (pr.type === 'adjust') await store.confirmEntry(pr.entryId);
+    else for (const pr of chosen) {
+      if (pr.type === 'adjust') await store.confirmEntry(pr.entryId);
+      // A code that is not an EAN but marked done stays as it is (e.g. a cable label number).
+      if (pr.type === 'note' && S.products[pr.code] && codeProblem(pr.code)) await store.putProduct({ ...S.products[pr.code], codeOk: true, updated: Date.now() });
+    }
   } catch (e) { toast(e.message); }
   await setSetting('corrections', setting('corrections', []).filter((x) => !chosen.some((c) => c.id === x.id)));
   if (accept && chosen.length) changed();
