@@ -1,0 +1,32 @@
+{
+  "name": "lager-scanner",
+  "version": "1.0.0",
+  "description": "Phone stock scanner: barcodes in/out, jobs, OCR + Claude Haiku check, Excel export",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173 --strictPort",
+    "test": "vitest run",
+    "test:e2e": "playwright test"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.135.0",
+    "@zxing/browser": "^0.2.1",
+    "@zxing/library": "^0.23.0",
+    "exceljs": "^4.4.0",
+    "idb": "^8.0.4",
+    "qrcode": "^1.5.4",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.5"
+  },
+  "private": true,
+  "type": "module",
+  "overrides": {
+    "uuid": "^11.1.1"
+  }
+}
