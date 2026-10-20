@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { takenForNeed, gtinValid, normalizeCode, resolveMaster, RepeatGuard, basketAdd, basketSet, basketTotal, shortages, guessFromOcr, ocrUsable, shouldRunCheck, makeTagCode, isTag, parseNeedText, suggestProducts, computeNeed, orderList, groupByCategory } from '../../src/logic.js';
+import { takenForNeed, gtinValid, normalizeCode, resolveMaster, RepeatGuard, basketAdd, basketSet, basketTotal, shortages, guessFromOcr, ocrUsable, shouldRunCheck, makeTagCode, isTag, parseNeedText, suggestProducts, computeNeed, orderList, groupByCategory, findIssues, codeProblem } from '../../src/logic.js';
 
 // Text Tesseract actually read from the EVN SLK24018 box photo (noise included).
 const EVN_OCR = `An 4% p—
@@ -175,5 +175,22 @@ describe('stock view', () => {
   it('groups by category with totals', () => {
     const g = groupByCategory(Object.values(BJ).filter((p) => !p.aliasOf));
     expect(g.map((x) => [x.category, x.items.length, x.qty])).toEqual([['Rahmen', 2, 20], ['Relais', 1, 5], ['Steckdose', 1, 30]]);
+  });
+});
+
+describe('correction checks', () => {
+  it('flags web addresses and bad EANs as codes', () => {
+    expect(codeProblem('https://produkte.evn-lichttechnik.com/x.html')).toMatch(/Webadresse/);
+    expect(codeProblem('0099009101')).toMatch(/10 Ziffern/);
+    expect(codeProblem('4011395128244')).toBe('');
+  });
+
+  it('suggests reversing manual corrections, but not ones confirmed as right', () => {
+    const log = [
+      { id: 'a', k: 'adjust', e: 'X', q: 4 },
+      { id: 'b', k: 'adjust', e: 'X', q: 5, ok: true },
+      { id: 'c', k: 'adjust', e: 'X', q: 1, undone: true },
+    ];
+    expect(findIssues({}, log).adjusts.map((e) => e.id)).toEqual(['a']);
   });
 });

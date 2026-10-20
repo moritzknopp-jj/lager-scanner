@@ -144,6 +144,13 @@ export async function bookLines({ kind, lines, jobId = null, basketId = rid(), n
 }
 
 // Undo adds a reversing entry; nothing is deleted from the log.
+// Marks a booking as checked (kept on purpose), so the correction agent leaves it alone.
+export async function confirmEntry(id) {
+  const db = await dbp;
+  const e = await db.get('log', id);
+  if (e) await db.put('log', { ...e, ok: true });
+}
+
 export async function undoEntry(id) {
   const db = await dbp;
   const tx = db.transaction(['products', 'log', 'jobs'], 'readwrite');

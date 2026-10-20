@@ -323,6 +323,16 @@ export async function undoEntry(id) {
   return { product: clone(C.products[e.e]), job: e.j ? clone(C.jobs[e.j]) : null, entry: rev };
 }
 
+// Marks a booking as checked (kept on purpose), so the correction agent leaves it alone.
+export async function confirmEntry(id) {
+  await readyP;
+  const f = findEntry(id);
+  if (!f) return;
+  const marked = { ...f.e, ok: true };
+  f.doc.entries = { ...(Array.isArray(f.doc.entries) ? Object.fromEntries(f.doc.entries.map((x) => [x.id, x])) : f.doc.entries), [id]: marked };
+  await mergeDoc('log/' + f.doc.id, { entries: { [id]: marked } });
+}
+
 export async function adjustCount(ean, newQty) {
   await readyP;
   recompute();

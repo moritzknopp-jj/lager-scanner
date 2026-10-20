@@ -325,7 +325,7 @@ export function findIssues(products, log = []) {
     dupGroups.push(g);
     for (const c of g) add(c, 'Vielleicht doppelt');
   }
-  const adjusts = log.filter((e) => e.k === 'adjust' && !e.undone);
+  const adjusts = log.filter((e) => e.k === 'adjust' && !e.undone && !e.ok); // ok: kept on purpose
   return { reasons, dupGroups, adjusts };
 }
 

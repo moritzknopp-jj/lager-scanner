@@ -635,6 +635,7 @@ async function resolveProposals(ids, accept) {
   const chosen = list.filter((x) => ids.includes(x.id)).sort((a, b) => order[a.type] - order[b.type]);
   try {
     if (accept) for (const pr of chosen) { await applyProposal(pr); await reloadState(); }
+    else for (const pr of chosen) if (pr.type === 'adjust') await store.confirmEntry(pr.entryId);
   } catch (e) { toast(e.message); }
   await setSetting('corrections', setting('corrections', []).filter((x) => !chosen.some((c) => c.id === x.id)));
   if (accept && chosen.length) changed();
@@ -657,7 +658,7 @@ function proposalHtml(pr) {
     <span class="label">${label}${pr.confidence ? ' · ' + esc(pr.confidence) : ''}</span>
     ${body}
     ${pr.reason ? `<div class="muted">${esc(pr.reason)}</div>` : ''}
-    <div class="row">${ok ? `<button class="small primary" data-act="corr-ok" data-id="${pr.id}">${ok}</button>` : ''}<button class="small ghost" data-act="corr-no" data-id="${pr.id}">${pr.type === 'note' ? 'Erledigt' : 'Verwerfen'}</button></div>
+    <div class="row">${ok ? `<button class="small primary" data-act="corr-ok" data-id="${pr.id}">${ok}</button>` : ''}<button class="small ghost" data-act="corr-no" data-id="${pr.id}">${pr.type === 'note' ? 'Erledigt' : pr.type === 'adjust' ? 'Ist richtig' : 'Verwerfen'}</button></div>
   </div>`;
 }
 
