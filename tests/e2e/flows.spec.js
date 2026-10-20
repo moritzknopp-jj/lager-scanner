@@ -145,18 +145,21 @@ test('Produkt ohne Barcode: Claude erkennt es, legt es mit eigenem Code an und f
     if (kindOf(body) !== 'identify') return { matches: [] };
     identifyCalls++;
     const base = { name: 'Koppelrelais 2 Wechsler 24 V DC', maker: 'Finder', series: '40', category: 'Relais', variant: '2 Wechsler', color: '', model: '40.52.9.024', description: 'Steckbares Relais.', read_text: 'FINDER 40.52 24VDC', barcode_digits: '' };
-    return identifyCalls === 1
+    return !JSON.stringify(body.messages).includes('T-FINDER-40-52-9-024')
       ? { ...base, match_code: '', match_confidence: 'none', match_reason: '' }
       : { ...base, match_code: 'T-FINDER-40-52-9-024', match_confidence: 'high', match_reason: 'Gleiche Typnummer 40.52.9.024' };
   });
   await openApp(page);
   await setKey(page);
 
-  await page.setInputFiles('#noCodeInput', path.join(FIX, 'barcode.png'));
-  await page.fill('#id-qty', '5');
+  // One scan button: no barcode in the photo, so Claude recognises it right away.
+  await page.setInputFiles('#scanInput', path.join(FIX, 'nobarcode.png'));
+  await expect(page.locator('#nf-name')).toHaveValue('Koppelrelais 2 Wechsler 24 V DC');
+  // A hint can be added and recognition repeated.
   await page.fill('#id-hint', 'Relais');
   await page.click('.sheet [data-act=identify]');
   await expect(page.locator('#nf-name')).toHaveValue('Koppelrelais 2 Wechsler 24 V DC');
+  await page.fill('#nf-qty', '5');
   await expect(page.locator('#nf-model')).toHaveValue('40.52.9.024');
   await expect(page.locator('#id-result')).toContainText('Gelesen: FINDER 40.52 24VDC');
   await page.click('.sheet [data-act=create-new]');
@@ -170,17 +173,21 @@ test('Produkt ohne Barcode: Claude erkennt es, legt es mit eigenem Code an und f
   expect(req.model).toBe('claude-haiku-5-5');
   expect(req.output_config.format.type).toBe('json_schema');
   expect(req.messages[0].content.filter((c) => c.type === 'image')).toHaveLength(1);
-  expect(req.messages[0].content.at(-1).text).toContain('Relais');
+  expect(calls.filter((c) => kindOf(c.body) === 'identify')[1].body.messages[0].content.at(-1).text).toContain('Relais');
+  expect(req.system).toContain('Busch-Jaeger');
 
-  // Next time: recognised, +2.
-  await page.setInputFiles('#noCodeInput', path.join(FIX, 'barcode.png'));
-  await page.fill('#id-qty', '2');
-  await page.click('.sheet [data-act=identify]');
+  // Next time: recognised, then asked how many.
+  await page.setInputFiles('#scanInput', path.join(FIX, 'nobarcode.png'));
   await expect(page.locator('#id-result')).toContainText('Erkannt: Koppelrelais 2 Wechsler 24 V DC');
   await expect(page.locator('#id-result')).toContainText('Bestand 5');
   await page.click('.sheet [data-act=use-match]');
-  await expect(page.locator(`#q-${code}`)).toHaveValue('2');
-  const sent = calls.filter((c) => kindOf(c.body) === 'identify')[1].body.messages[0].content[0].text;
+  await expect(page.locator('.sheet h2')).toHaveText('Wie viele hinzufügen?');
+  await page.click('.sheet [data-act=q-set][data-n="5"]');
+  await page.click('.sheet [data-act=q-step][data-d="-1"]');
+  await expect(page.locator('#qs-ok')).toHaveText('+4 in den Korb');
+  await page.click('#qs-ok');
+  await expect(page.locator(`#q-${code}`)).toHaveValue('4');
+  const sent = calls.filter((c) => kindOf(c.body) === 'identify')[2].body.messages[0].content[0].text;
   expect(sent).toContain(code); // the catalog with own codes goes along
 
   // Own code works like a barcode (e.g. scanned from the printed QR label).
@@ -194,12 +201,12 @@ test('Produkt ohne Barcode: Claude erkennt es, legt es mit eigenem Code an und f
 
 test('ohne API-Schlüssel: Produkt ohne Barcode selbst anlegen', async ({ page }) => {
   await openApp(page);
-  await page.setInputFiles('#noCodeInput', path.join(FIX, 'barcode.png'));
+  await page.setInputFiles('#scanInput', path.join(FIX, 'nobarcode.png'));
   await expect(page.locator('.sheet [data-act=identify]')).toHaveCount(0);
-  await page.fill('#id-qty', '3');
   await page.click('.sheet [data-act=manual-new]');
   await page.fill('#nf-name', 'Abzweigdose grau');
   await page.selectOption('#nf-cat', 'Dose');
+  await page.fill('#nf-qty', '3');
   await page.click('.sheet [data-act=create-new]');
   await expect(page.locator('#q-T-ABZWEIGDOSE-GRAU')).toHaveValue('3');
 });
@@ -255,12 +262,12 @@ test('Bedarfsposition, die nicht automatisch passt: Claude ordnet zu', async ({ 
   });
   await openApp(page);
   // A tagged product in stock, created through the no-barcode form.
-  await page.setInputFiles('#noCodeInput', path.join(FIX, 'barcode.png'));
-  await page.fill('#id-qty', '5');
+  await page.setInputFiles('#scanInput', path.join(FIX, 'nobarcode.png'));
   await page.click('.sheet [data-act=manual-new]');
   await page.fill('#nf-name', 'Relais 2 Wechsler 24 V');
   await page.fill('#nf-maker', 'Finder');
   await page.fill('#nf-model', '40.52');
+  await page.fill('#nf-qty', '5');
   await page.click('.sheet [data-act=create-new]');
   await book(page);
   await setKey(page);
@@ -373,11 +380,25 @@ test('falsch getippter Barcode wird abgelehnt, Handscanner-Prellen ignoriert', a
   await expect(page.locator(`#q-${EVN}`)).toHaveValue('1');
 });
 
-test('Barcode aus einem Foto', async ({ page }) => {
+test('Produkt scannen mit Barcode: Barcode wird Code, dann „Wie viele?“, nochmal scannen fragt wieder', async ({ page }) => {
   await openApp(page);
-  await page.setInputFiles('#photoInput', path.join(FIX, 'barcode.png'));
-  await expect(page.locator(`#q-${EVN}`)).toHaveValue('1', { timeout: 15_000 });
-  await expect.poll(async () => (await product(page, EVN))?.status).toBe('ocr');
+  await page.setInputFiles('#scanInput', path.join(FIX, 'barcode.png'));
+  await expect(page.locator('.sheet h2')).toHaveText('Wie viele hinzufügen?', { timeout: 15_000 });
+  await expect(page.locator('.sheet')).toContainText(EVN);
+  await expect(page.locator('.sheet')).toContainText('Neu angelegt');
+  await page.fill('#qs-qty', '24');
+  await page.press('#qs-qty', 'Enter');
+  await expect(page.locator(`#q-${EVN}`)).toHaveValue('24');
+  await expect.poll(async () => (await product(page, EVN))?.status).toBe('ocr'); // waits for Claude research
+  // Same product again: asks how many to add, shows what is already in the basket.
+  await page.setInputFiles('#scanInput', path.join(FIX, 'barcode.png'));
+  await expect(page.locator('.sheet')).toContainText('schon im Korb: 24');
+  await expect(page.locator('.sheet')).not.toContainText('Neu angelegt');
+  await page.click('.sheet [data-act=q-set][data-n="10"]');
+  await page.click('#qs-ok');
+  await expect(page.locator(`#q-${EVN}`)).toHaveValue('34');
+  await page.click('#basketBook');
+  await expect(page.locator('#scanMsg')).toContainText('Eingebucht: 34 Stück');
 });
 
 test('Daten bleiben nach Neuladen erhalten', async ({ page }) => {

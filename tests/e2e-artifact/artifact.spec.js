@@ -39,7 +39,8 @@ const eansIn = (prompt) => (prompt.match(/for each of these EANs: ([\d, ]+)/)?.[
 test('claude.ai-Version: keine Live-Kamera, kein API-Schlüssel, Claude über das Abo', async ({ page }) => {
   await openArtifact(page);
   await expect(page.locator('.camera')).toBeHidden();
-  await expect(page.locator('#photoBtn')).toContainText('Barcode fotografieren');
+  await expect(page.locator('#scanBtn')).toContainText('Produkt scannen');
+  await expect(page.locator('#noCodeBtn')).toHaveCount(0); // one button only
   await page.click('#openSettings');
   await expect(page.locator('#set-key')).toHaveCount(0);
   await expect(page.locator('.sheet')).toContainText('läuft über dein Claude-Abo');
@@ -57,14 +58,18 @@ test('Barcode-Foto: Produkt wird angelegt, Claude Haiku erkennt es am Foto (Pake
   await page.click('.sheet [data-act=save-settings]');
   await page.waitForFunction(() => window.__lager.state.meta.batchSize === 1);
 
-  await page.setInputFiles('#photoInput', path.join(FIX, 'barcode.png'));
-  await expect(page.locator(`#q-${EVN}`)).toHaveValue('1', { timeout: 15_000 });
+  await page.setInputFiles('#scanInput', path.join(FIX, 'barcode.png'));
+  await expect(page.locator('.sheet h2')).toHaveText('Wie viele hinzufügen?', { timeout: 15_000 });
+  await page.fill('#qs-qty', '12');
+  await page.click('#qs-ok');
+  await expect(page.locator(`#q-${EVN}`)).toHaveValue('12');
   await expect.poll(async () => (await product(page, EVN))?.status, { timeout: 15_000 }).toBe('verified');
   expect(await product(page, EVN)).toMatchObject({ name: 'LED-Netzteil 24 V DC 0,1-18 W IP20', maker: 'EVN Lichttechnik', model: 'SLK24018', category: 'Netzteil/Treiber' });
   const c = calls.find((x) => x.kind === 'research');
   expect(c.model).toBe('claude-haiku-5-5');
   expect(c.nImages).toBe(1); // Claude reads the label photo itself
   expect(eansIn(c.prompt)).toEqual([EVN]);
+  expect(c.prompt).toContain('Busch-Jaeger');
   await expect(page.locator(`.line[data-ean="${EVN}"]`)).toContainText('LED-Netzteil 24 V DC');
 });
 
@@ -78,10 +83,9 @@ test('Produkt ohne Barcode: Claude erkennt es am Foto und findet es beim zweiten
       return n === 1 ? { ...base, match_code: '', match_confidence: 'none', match_reason: '' } : { ...base, match_code: 'T-FINDER-40-52-9-024', match_confidence: 'high', match_reason: 'Gleiche Typnummer' };
     },
   });
-  await page.setInputFiles('#noCodeInput', path.join(FIX, 'barcode.png'));
-  await page.fill('#id-qty', '5');
-  await page.click('.sheet [data-act=identify]');
+  await page.setInputFiles('#scanInput', path.join(FIX, 'nobarcode.png'));
   await expect(page.locator('#nf-name')).toHaveValue('Koppelrelais 2 Wechsler 24 V DC');
+  await page.fill('#nf-qty', '5');
   await page.click('.sheet [data-act=create-new]');
   const code = 'T-FINDER-40-52-9-024';
   await expect(page.locator(`#q-${code}`)).toHaveValue('5');
@@ -89,11 +93,11 @@ test('Produkt ohne Barcode: Claude erkennt es am Foto und findet es beim zweiten
   expect((await product(page, code)).qty).toBe(5);
   expect(calls[0]).toMatchObject({ kind: 'identify', nImages: 1, model: 'claude-haiku-5-5' });
 
-  await page.setInputFiles('#noCodeInput', path.join(FIX, 'barcode.png'));
-  await page.fill('#id-qty', '2');
-  await page.click('.sheet [data-act=identify]');
+  await page.setInputFiles('#scanInput', path.join(FIX, 'nobarcode.png'));
   await expect(page.locator('#id-result')).toContainText('Erkannt: Koppelrelais 2 Wechsler 24 V DC');
   await page.click('.sheet [data-act=use-match]');
+  await page.fill('#qs-qty', '2');
+  await page.click('#qs-ok');
   await expect(page.locator(`#q-${code}`)).toHaveValue('2');
   expect(calls[1].prompt).toContain(code);
 
@@ -106,8 +110,7 @@ test('Produkt ohne Barcode: Claude erkennt es am Foto und findet es beim zweiten
 
 test('Claude abgelehnt: verständliche Meldung, selbst anlegen geht weiter', async ({ page }) => {
   await openArtifact(page, { reply: () => ({ __error: 'not_granted' }) });
-  await page.setInputFiles('#noCodeInput', path.join(FIX, 'barcode.png'));
-  await page.click('.sheet [data-act=identify]');
+  await page.setInputFiles('#scanInput', path.join(FIX, 'nobarcode.png'));
   await expect(page.locator('#id-result')).toContainText('Claude-Zugriff wurde für diese App abgelehnt');
   await page.click('.sheet [data-act=manual-new]');
   await page.fill('#nf-name', 'Abzweigdose grau');

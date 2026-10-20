@@ -73,4 +73,8 @@ export function writeFixtures(dir) {
   // In view 1 s, out of view 1.5 s, repeating: like holding up one lamp after another.
   fs.writeFileSync(path.join(dir, 'blink.y4m'), y4m([...Array(10).fill(bc), ...Array(15).fill(null)], W, H));
   fs.writeFileSync(path.join(dir, 'barcode.png'), grayPng(barcodeGray(EAN, 1200, 800, 8), 1200, 800));
+  // A product photo without any barcode: a grey box.
+  const plain = new Uint8Array(900 * 700).fill(235);
+  for (let y = 150; y < 550; y++) plain.fill(120, y * 900 + 200, y * 900 + 700);
+  fs.writeFileSync(path.join(dir, 'nobarcode.png'), grayPng(plain, 900, 700));
 }

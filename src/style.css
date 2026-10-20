@@ -174,3 +174,9 @@ details pre { white-space: pre-wrap; font-size: .8rem; background: var(--bg); pa
 textarea { font: 14px/1.4 var(--font-mono); }
 .btn.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
 .big-btn { min-height: 56px; font-size: 1.1rem; }
+.hint { font-size: .88rem; margin-top: -6px; }
+#scanBtn { width: 100%; }
+.qtybig { display: grid; grid-template-columns: 64px 1fr 64px; gap: 8px; }
+.qtybig button { min-height: 64px; font-size: 1.8rem; padding: 0; }
+.qtybig input { min-height: 64px; text-align: center; font-family: var(--font-head); font-size: 2rem; font-weight: 700; }
+.quick button { flex: 1 1 0; }

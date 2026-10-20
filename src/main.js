@@ -174,87 +174,133 @@ function stopCamera() {
   $('video').hidden = true; $('camIdle').hidden = false; $('camHud').hidden = true;
 }
 
-async function onPhoto(file) {
+// ---------- one button: scan a product ----------
+// Photo -> barcode found: that is the product's code. No barcode: Claude recognises the product.
+// Either way the app then asks how many.
+async function scanProduct(file) {
   if (!file) return;
-  scanMsg('Lese Barcode…');
+  scanMsg('Suche Barcode…');
   try {
     const small = await shrinkPhoto(file);
-    const code = await decodePhoto(file);
-    if (!code) {
-      beep(false);
-      scanMsg('Kein Barcode im Foto gefunden. Näher ran, damit der ganze Barcode scharf ist – oder <b>„Ohne Barcode“</b> nutzen, dann erkennt Claude das Produkt am Foto.', 'err');
+    const raw = await decodePhoto(file);
+    const n = raw ? normalizeCode(raw) : null;
+    scanMsg('');
+    if (n?.code) {
+      const isNew = !S.products[n.code];
+      if (isNew) await createProduct(n.code, small); // Claude researches it from this photo
+      beep(true);
+      qtySheet(master(n.code).ean, { isNew });
       return;
     }
-    const n = normalizeCode(code);
-    await handleCode(code, 'photo', n.code && !S.products[n.code] ? small : null);
+    identifySheet(small);
   } catch (e) { scanMsg(esc(e.message), 'err'); }
 }
 
-// ---------- products without barcode ----------
-async function startIdentify() {
-  if (S.camera) {
-    const blob = await captureFrame($('video'));
-    if (blob) return identifySheet(blob);
-  }
-  $('noCodeInput').click();
+async function onScanClick(e) {
+  // With the live camera on (GitHub version) take the current frame instead of a new photo.
+  if (!S.camera) return;
+  e.preventDefault();
+  const blob = await captureFrame($('video'));
+  if (blob) scanProduct(blob);
 }
 
-function identifySheet(blob, preset = {}) {
-  const url = URL.createObjectURL(blob);
-  const hasKey = aiImages();
+// "How many?" after every scanned product, so 24 lamps are one scan plus "24".
+function qtySheet(code, { isNew = false, note = '' } = {}) {
+  const p = master(code);
+  const inBasket = S.basket.find((l) => l.ean === p.ean)?.qty || 0;
+  const verb = S.mode === 'out' ? 'entnehmen' : 'hinzufügen';
   openSheet(`
-    <div class="top"><h2>Produkt ohne Barcode</h2><button class="small" data-act="close">Abbrechen</button></div>
-    <img class="thumb" src="${url}" alt="Foto des Produkts">
-    <div class="row">
-      <label class="label" for="id-qty" style="flex:0 0 auto">Anzahl</label>
-      <input id="id-qty" type="number" inputmode="numeric" min="1" value="${preset.qty || 1}" style="max-width:110px">
+    <div class="top"><h2>Wie viele ${verb}?</h2><button class="small" data-act="close">Abbrechen</button></div>
+    <div class="panel">
+      <b>${esc(p.name || (isNew ? 'Neues Produkt' : 'Unbenanntes Produkt'))}</b>
+      ${subline(p) ? `<span class="muted">${esc(subline(p))}</span>` : ''}
+      <span class="muted"><span class="mono">${esc(p.ean)}</span> · Bestand ${p.qty || 0}${inBasket ? ` · schon im Korb: ${inBasket}` : ''}</span>
+      ${note ? `<span>${esc(note)}</span>` : ''}
+      ${isNew ? `<span class="muted">Neu angelegt${aiOn() ? ' – Claude erkennt es am Foto' : ''}.</span>` : ''}
     </div>
-    <input id="id-hint" placeholder="Hinweis (optional), z.B. „Relais“ oder „Rahmen 2-fach“" value="${esc(preset.hint || '')}">
-    <div id="id-result"></div>
-    <div class="row" id="id-actions">
-      ${hasKey ? '<button class="primary grow" data-act="identify">Mit Claude erkennen</button>' : ''}
-      <button class="grow" data-act="manual-new">${hasKey ? 'Selbst anlegen' : 'Anlegen'}</button>
+    <div class="qtybig">
+      <button data-act="q-step" data-d="-1" aria-label="Eins weniger">−</button>
+      <input id="qs-qty" type="number" inputmode="numeric" min="1" value="1" aria-label="Anzahl">
+      <button data-act="q-step" data-d="1" aria-label="Eins mehr">+</button>
     </div>
-    ${hasKey ? '' : `<span class="muted">${ARTIFACT ? 'Claude ist gerade nicht verfügbar (z.B. Zugriff abgelehnt oder Limit erreicht).' : 'Mit einem API-Schlüssel in den Einstellungen erkennt Claude das Produkt am Foto und findet es beim nächsten Mal wieder.'}</span>`}
+    <div class="row wrap-gap quick">${[1, 5, 10, 20, 50].map((n) => `<button class="small" data-act="q-set" data-n="${n}">${n}</button>`).join('')}</div>
+    <button class="primary big" data-act="q-ok" id="qs-ok">+1 in den Korb</button>
   `, async (act, el) => {
-    const qty = Math.max(1, parseInt($('id-qty').value, 10) || 1);
+    const inp = $('qs-qty');
+    if (act === 'close') closeSheet();
+    if (act === 'q-step') inp.value = Math.max(1, (parseInt(inp.value, 10) || 1) + Number(el.dataset.d));
+    if (act === 'q-set') inp.value = el.dataset.n;
+    if (act === 'q-step' || act === 'q-set') inp.dispatchEvent(new Event('input'));
+    if (act === 'q-ok') {
+      const q = Math.max(1, parseInt(inp.value, 10) || 1);
+      closeSheet();
+      await addToBasket(p.ean, q);
+    }
+  });
+  const inp = $('qs-qty');
+  const label = () => { $('qs-ok').textContent = `+${Math.max(1, parseInt(inp.value, 10) || 1)} in den Korb`; };
+  inp.addEventListener('input', label);
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('qs-ok').click(); } });
+  inp.focus(); inp.select();
+}
+
+// ---------- products without barcode ----------
+function identifySheet(blob) {
+  const url = URL.createObjectURL(blob);
+  const ai = aiImages();
+  openSheet(`
+    <div class="top"><h2>Kein Barcode gefunden</h2><button class="small" data-act="close">Abbrechen</button></div>
+    <img class="thumb" src="${url}" alt="Foto des Produkts">
+    <div id="id-result">${ai ? '<div class="msg info">Claude erkennt das Produkt…</div>' : ''}</div>
+    <div class="row" id="id-actions" ${ai ? 'hidden' : ''}>
+      <input id="id-hint" class="grow" placeholder="Hinweis, z.B. „Busch-Jaeger Rahmen 2-fach“">
+      ${ai ? '<button data-act="identify">Nochmal erkennen</button>' : ''}
+    </div>
+    <button class="ghost" data-act="manual-new" id="id-manual">${ai ? 'Selbst anlegen' : 'Produkt anlegen'}</button>
+    ${ai ? '' : `<span class="muted">${ARTIFACT ? 'Claude ist gerade nicht verfügbar (z.B. Zugriff abgelehnt oder Limit erreicht).' : 'Mit einem API-Schlüssel in den Einstellungen erkennt Claude das Produkt am Foto.'}</span>`}
+  `, async (act, el) => {
     if (act === 'close') { closeSheet(); URL.revokeObjectURL(url); }
-    if (act === 'identify') await runIdentify(blob, qty);
-    if (act === 'manual-new') showNewForm({}, qty);
-    if (act === 'use-match') { await addToBasket(el.dataset.code, qty); closeSheet(); URL.revokeObjectURL(url); }
+    if (act === 'identify') await runIdentify(blob);
+    if (act === 'manual-new') showNewForm({});
+    if (act === 'use-match') { closeSheet(); URL.revokeObjectURL(url); qtySheet(el.dataset.code, { note: el.dataset.note }); }
     if (act === 'create-new') {
       const f = readNewForm();
       if (!f.name) { toast('Bitte mindestens einen Namen eingeben.'); return; }
+      const qty = Math.max(1, parseInt($('nf-qty').value, 10) || 1);
       const code = await createTagged(f, blob);
-      await addToBasket(code, qty);
       closeSheet(); URL.revokeObjectURL(url);
+      await addToBasket(code, qty);
     }
   });
+  if (ai) runIdentify(blob);
 }
 
-async function runIdentify(blob, qty) {
+async function runIdentify(blob) {
   const res = $('id-result');
-  res.innerHTML = '<div class="msg info">Claude sieht sich das Foto an…</div>';
+  res.innerHTML = '<div class="msg info">Claude erkennt das Produkt…</div>';
   $('id-actions').hidden = true;
   try {
     const { identifyPhoto, compactCatalog } = await lazyAi();
-    const r = await identifyPhoto({ apiKey: setting('apiKey', ''), image: await shrinkPhoto(blob), hint: $('id-hint').value.trim(), catalog: compactCatalog(S.products) });
+    const r = await identifyPhoto({ apiKey: setting('apiKey', ''), image: blob, hint: ($('id-hint')?.value || '').trim(), catalog: compactCatalog(S.products) });
+    if (!$('id-result')) return; // sheet closed meanwhile
     const digits = normalizeCode(r.barcode_digits || '').code;
     const m = r.match_code && S.products[r.match_code] ? master(r.match_code) : digits && S.products[digits] ? master(digits) : null;
+    $('id-actions').hidden = false;
     if (m && r.match_confidence !== 'low' && r.match_confidence !== 'none') {
       res.innerHTML = `<div class="msg ok"><b>Erkannt:</b> ${esc(m.name || m.ean)}<br><span class="muted">${esc(subline(m))} · Bestand ${m.qty || 0}</span>${r.match_reason ? `<br>${esc(r.match_reason)}` : ''}</div>
-        <div class="row"><button class="primary grow" data-act="use-match" data-code="${esc(m.ean)}">+${qty} in den Korb</button><button class="grow" data-act="manual-new">Anderes Produkt</button></div>`;
+        <div class="row"><button class="primary grow" data-act="use-match" data-code="${esc(m.ean)}" data-note="${esc('Erkannt: ' + (r.match_reason || ''))}">Weiter: Anzahl</button><button class="grow" data-act="manual-new">Anderes Produkt</button></div>`;
       return;
     }
-    showNewForm({ ...r, code: digits || '' }, qty, r.read_text ? `Gelesen: ${r.read_text}` : '');
+    showNewForm({ ...r, code: digits || '' }, r.read_text ? `Gelesen: ${r.read_text}` : '');
   } catch (e) {
+    if (!$('id-result')) return;
     res.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
     $('id-actions').hidden = false;
   }
 }
 
-function showNewForm(f, qty, note = '') {
-  $('id-actions').hidden = true;
+function showNewForm(f, note = '') {
+  $('id-manual').hidden = true;
   $('id-result').innerHTML = `
     ${note ? `<div class="muted">${esc(note)}</div>` : ''}
     <div class="panel">
@@ -266,7 +312,8 @@ function showNewForm(f, qty, note = '') {
       <input type="hidden" id="nf-code" value="${esc(f.code || '')}">
       <input type="hidden" id="nf-desc" value="${esc(f.description || '')}">
       <input type="hidden" id="nf-read" value="${esc(f.read_text || '')}">
-      <button class="primary" data-act="create-new">Anlegen und +${qty} in den Korb</button>
+      <div class="row"><label class="label" for="nf-qty" style="flex:0 0 auto">Anzahl</label><input id="nf-qty" type="number" inputmode="numeric" min="1" value="1" style="max-width:110px"></div>
+      <button class="primary" data-act="create-new">Anlegen und in den Korb</button>
     </div>`;
 }
 function readNewForm() {
@@ -642,7 +689,7 @@ function renderBasket(showShort = false) {
         ${sub}
       </div>`;
     }).join('')
-    : `<div class="empty">${out ? 'Jedes Teil scannen, das du mitnimmst – z.B. alle 24 Lampen – dann zusammen entnehmen.' : 'Jedes Teil scannen, das ins Lager kommt, dann zusammen einbuchen.'}</div>`;
+    : `<div class="empty">${out ? 'Produkt scannen, Anzahl eingeben (z.B. 24 Lampen) – dann alles zusammen entnehmen.' : 'Produkt scannen, Anzahl eingeben – dann alles zusammen einbuchen.'}</div>`;
   $('basketClear').hidden = !lines.length;
   const btn = $('basketBook');
   btn.disabled = !lines.length;
@@ -1065,9 +1112,8 @@ function bind() {
   $('jobNewQuick').onclick = () => { showView('jobs'); $('jobName').focus(); };
   $('camStart').onclick = toggleCamera;
   $('camStop').onclick = stopCamera;
-  $('noCodeBtn').onclick = startIdentify;
-  $('noCodeInput').addEventListener('change', (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) identifySheet(f); });
-  $('photoInput').addEventListener('change', (e) => { const f = e.target.files[0]; e.target.value = ''; onPhoto(f); });
+  $('scanBtn').addEventListener('click', onScanClick);
+  $('scanInput').addEventListener('change', (e) => { const f = e.target.files[0]; e.target.value = ''; scanProduct(f); });
   $('codeForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const val = $('codeInput').value; $('codeInput').value = '';
@@ -1199,8 +1245,6 @@ async function start() {
   bind();
   if (ARTIFACT) {
     document.querySelector('.camera').hidden = true; // the live camera is not available inside claude.ai
-    $('photoBtn').classList.add('primary', 'big-btn');
-    $('photoBtn').childNodes[2].textContent = ' Barcode fotografieren ';
   }
   try { await storeReady; } catch (e) { scanMsg(esc(e.message), 'err'); return; }
   if (ARTIFACT) S.ai = await (await lazyAi()).capabilities().catch(() => null);
@@ -1229,5 +1273,5 @@ async function start() {
   if (!window.isSecureContext) scanMsg('Die Kamera braucht eine sichere (https) Adresse.', 'err');
 }
 
-window.__lager = { handleCode, state: S, maybeRunCheck, identifySheet };
+window.__lager = { handleCode, state: S, maybeRunCheck, identifySheet, scanProduct };
 start().catch((e) => { document.body.insertAdjacentHTML('afterbegin', `<div class="msg err">App konnte nicht starten: ${esc(e.message)}</div>`); });

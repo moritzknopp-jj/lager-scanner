@@ -27,6 +27,8 @@ export function compactCatalog(products) {
 }
 const CATALOG_KEYS = 'Catalog keys: c=code (EAN, or own tag code starting with T-), n=name, m=maker, s=series/line, k=category, v=variant, a=article/model number, q=in stock.';
 
+const MAKER_HINT = `Most products in this stock are from Busch-Jaeger (ABB). Use what you know about Busch-Jaeger: article numbers like "1722-914" or "2006/1 UC-914", ABB order codes like "2CKA001725A1558", GTIN prefix 4011395, and series such as future linear, Busch-balance SI, Busch-axcent, solo, carat, Busch-dynasty, Reflex SI, Busch-free@home, Busch-Jaeger Smarter Home. Other makers do occur.`;
+
 const FIELDS = `Fields (German values):
 - name: short product name as a German electrician would write it, with the key specs, e.g. "SCHUKO-Steckdose mit Klappdeckel" or "LED-Netzteil 24 V DC 18 W IP20".
 - maker: manufacturer, e.g. "Busch-Jaeger", "Gira", "EVN Lichttechnik".
@@ -62,6 +64,7 @@ function checkStop(res) {
 const RESEARCH_SYSTEM = `You research products for the stock list of a German electrical installation company.
 Each item was scanned by barcode (EAN). Some have text read from the label by OCR (may be noisy), some have a photo instead.
 Use web search to look up each EAN (and the label text) to find the exact product, preferring the manufacturer's or a wholesaler's page. Keep searches short; one per product is usually enough.
+${MAKER_HINT}
 ${FIELDS}
 - confidence: high, medium or low.
 - note: one short German sentence if a human should check something (e.g. EAN not found online, label EAN differs), else "".
@@ -128,6 +131,7 @@ export async function identifyPhoto({ apiKey, image, hint, catalog }) {
       max_tokens: 4000,
       system: `You identify products for the stock list of a German electrical installation company from a photo. The product may have no barcode.
 Read every ID, type number or text printed on it. Decide whether it is the same product as one in the existing catalog (same maker and type/article number, or clearly identical). Only match when you are sure it is the same article, not just the same kind.
+${MAKER_HINT}
 ${FIELDS}
 - match_code: the catalog code if it is the same product, else "".
 - match_confidence: high, medium, low, or none when there is no match.
