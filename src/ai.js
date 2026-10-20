@@ -27,7 +27,9 @@ export function compactCatalog(products) {
 }
 const CATALOG_KEYS = 'Catalog keys: c=code (EAN, or own tag code starting with T-), n=name, m=maker, s=series/line, k=category, v=variant, a=article/model number, q=in stock.';
 
-const MAKER_HINT = `Most products in this stock are from Busch-Jaeger (ABB). Use what you know about Busch-Jaeger: article numbers like "1722-914" or "2006/1 UC-914", ABB order codes like "2CKA001725A1558", GTIN prefix 4011395, and series such as future linear, Busch-balance SI, Busch-axcent, solo, carat, Busch-dynasty, Reflex SI, Busch-free@home, Busch-Jaeger Smarter Home. Other makers do occur.`;
+const MAKER_HINT = `Almost everything in this stock is from Busch-Jaeger (ABB). Look up Busch-Jaeger first (busch-jaeger.de), then ABB (new.abb.com): their article numbers are the cleanest IDs. Busch-Jaeger article numbers look like "1721-914", "1722-914" or "2006/1 UC-914"; ABB order codes look like "2CKA001725A1558"; Busch-Jaeger GTINs start with 4011395. In article numbers, 1721 = frame 1-fach, 1722 = 2-fach, 1723 = 3-fach, and the suffix is the design and colour (e.g. -914 = Busch-balance SI alpinweiß, -184K = future linear studioweiß).
+Frames (Rahmen): always decide the design line. This company mainly uses Busch-balance SI and future linear. Busch-balance SI: glossy, gently domed surface, softly rounded outer edges and corners. future linear: flat surface with straight, crisp edges and nearly square corners. Others: Reflex SI (strongly rounded, thick), Busch-axcent (flat frame with wide border), solo, carat (glass/metal), Busch-dynasty. If you cannot tell, say so in note.
+Other makers occur: lights and drivers (e.g. EVN, Easylux) usually carry the brand and article number on the label; cables are written like "NYM-J 3x1,5" or "J-Y(St)Y 2x2x0,8" and counted in metres.`;
 
 const FIELDS = `Fields (German values):
 - name: short product name as a German electrician would write it, with the key specs, e.g. "SCHUKO-Steckdose mit Klappdeckel" or "LED-Netzteil 24 V DC 18 W IP20".
@@ -37,7 +39,10 @@ const FIELDS = `Fields (German values):
 - variant: e.g. "1-fach", "2-fach", "3-fach", "16 A", "10 m"; else "".
 - color: e.g. "studioweiß", "anthrazit"; else "".
 - model: manufacturer article number, e.g. "1721-184K" or "SLK24018".
-- description: one short German sentence with useful details.`;
+- description: one short German sentence with useful details.
+- order_number: manufacturer order code (for ABB/Busch-Jaeger the 2CKA… code) if known, else "".
+- all_ids: every number and ID you can read or know for this product, comma separated (EAN/GTIN, article number, order code, type numbers, other codes), so the stock list can be priced later.
+- unit: "m" for cable/wire sold by the metre, else "Stück".`;
 
 async function blobToBase64(blob) {
   const buf = new Uint8Array(await blob.arrayBuffer());
@@ -71,7 +76,7 @@ ${FIELDS}
 - source: the URL you relied on, or "".
 Never invent a product. If you cannot identify it, leave fields empty and explain in note.
 Also list duplicates: pairs of different codes (new items and catalog) that are clearly the same product (same maker and article number).
-Your final message must be only a JSON object: {"items":[{"ean","name","maker","series","category","variant","color","model","description","confidence","note","source","ean_on_label"}],"duplicates":[{"ean_a","ean_b","reason"}]}`;
+Your final message must be only a JSON object: {"items":[{"ean","name","maker","series","category","variant","color","model","order_number","all_ids","unit","description","confidence","note","source","ean_on_label"}],"duplicates":[{"ean_a","ean_b","reason"}]}`;
 
 export async function researchBatch({ apiKey, items, catalog }) {
   const c = client(apiKey);
@@ -115,10 +120,11 @@ const IDENTIFY_SCHEMA = {
     match_reason: { type: 'string' },
     name: { type: 'string' }, maker: { type: 'string' }, series: { type: 'string' }, category: { type: 'string' },
     variant: { type: 'string' }, color: { type: 'string' }, model: { type: 'string' }, description: { type: 'string' },
+    order_number: { type: 'string' }, all_ids: { type: 'string' }, unit: { type: 'string' }, ean: { type: 'string' },
     read_text: { type: 'string' },
     barcode_digits: { type: 'string' },
   },
-  required: ['match_code', 'match_confidence', 'match_reason', 'name', 'maker', 'series', 'category', 'variant', 'color', 'model', 'description', 'read_text', 'barcode_digits'],
+  required: ['match_code', 'match_confidence', 'match_reason', 'name', 'maker', 'series', 'category', 'variant', 'color', 'model', 'order_number', 'all_ids', 'unit', 'ean', 'description', 'read_text', 'barcode_digits'],
   additionalProperties: false,
 };
 
@@ -137,7 +143,8 @@ ${FIELDS}
 - match_confidence: high, medium, low, or none when there is no match.
 - match_reason: short German reason.
 - read_text: the IDs and text you read from the product.
-- barcode_digits: digits of an EAN barcode if one is visible, else "".`,
+- barcode_digits: digits of an EAN barcode if one is visible, else "".
+- ean: the product's EAN/GTIN if visible or if you are certain of it, else "".`,
       messages: [{
         role: 'user',
         content: [
@@ -151,6 +158,34 @@ ${FIELDS}
   } catch (err) { throw friendlyError(err); }
   checkStop(res);
   return lastJson(res.content);
+}
+
+// ---------- add a product by name, with web search ----------
+export async function lookupText({ apiKey, text, catalog }) {
+  const c = client(apiKey);
+  const system = `You find products for the stock list of a German electrical installation company. The user typed a product name. Search the web (Busch-Jaeger first, then ABB, then the maker) for the exact article.
+${MAKER_HINT}
+${FIELDS}
+- match_code / match_confidence (high, medium, low, none) / match_reason: the catalog code if it is already in the catalog.
+- ean: the product's EAN/GTIN if you found it, else "".
+- read_text and barcode_digits: "".
+Your final message must be only a JSON object with the keys match_code, match_confidence, match_reason, name, maker, series, category, variant, color, model, order_number, all_ids, unit, description, read_text, barcode_digits, ean.`;
+  const base = { model: MODEL, max_tokens: 8000, system, output_config: { effort: 'low' } };
+  const tools = [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }];
+  const messages = [{ role: 'user', content: `${CATALOG_KEYS}\nCatalog:\n${JSON.stringify(catalog)}\n\nTyped product: ${text}` }];
+  let res;
+  try {
+    res = await c.messages.create({ ...base, tools, messages });
+    for (let i = 0; i < 3 && res.stop_reason === 'pause_turn'; i++) res = await c.messages.create({ ...base, tools, messages: [messages[0], { role: 'assistant', content: res.content }] });
+  } catch (err) {
+    if (err instanceof Anthropic.BadRequestError && /tool|web_search/i.test(err.message || '')) {
+      try { res = await c.messages.create({ ...base, messages }); } catch (e2) { throw friendlyError(e2); }
+    } else throw friendlyError(err);
+  }
+  checkStop(res);
+  const r = lastJson(res.content);
+  const keys = ['match_code', 'match_confidence', 'match_reason', 'name', 'maker', 'series', 'category', 'variant', 'color', 'model', 'order_number', 'all_ids', 'unit', 'description', 'read_text', 'barcode_digits', 'ean'];
+  return Object.fromEntries(keys.map((k) => [k, typeof r?.[k] === 'string' ? r[k] : '']));
 }
 
 // ---------- match free-text needs to stock ----------

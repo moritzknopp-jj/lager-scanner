@@ -39,7 +39,9 @@ export function compactCatalog(products, budget = 140000) {
 }
 const CATALOG_KEYS = 'Catalog keys: c=code (EAN, or own tag code starting with T-), n=name, m=maker, s=series/line, k=category, v=variant, a=article/model number, q=in stock.';
 
-const MAKER_HINT = `Most products in this stock are from Busch-Jaeger (ABB). Use what you know about Busch-Jaeger: article numbers like "1722-914" or "2006/1 UC-914", ABB order codes like "2CKA001725A1558", GTIN prefix 4011395, and series such as future linear, Busch-balance SI, Busch-axcent, solo, carat, Busch-dynasty, Reflex SI, Busch-free@home, Busch-Jaeger Smarter Home. Other makers do occur.`;
+const MAKER_HINT = `Almost everything in this stock is from Busch-Jaeger (ABB). Look up Busch-Jaeger first (busch-jaeger.de), then ABB (new.abb.com): their article numbers are the cleanest IDs. Busch-Jaeger article numbers look like "1721-914", "1722-914" or "2006/1 UC-914"; ABB order codes look like "2CKA001725A1558"; Busch-Jaeger GTINs start with 4011395. In article numbers, 1721 = frame 1-fach, 1722 = 2-fach, 1723 = 3-fach, and the suffix is the design and colour (e.g. -914 = Busch-balance SI alpinweiß, -184K = future linear studioweiß).
+Frames (Rahmen): always decide the design line. This company mainly uses Busch-balance SI and future linear. Busch-balance SI: glossy, gently domed surface, softly rounded outer edges and corners. future linear: flat surface with straight, crisp edges and nearly square corners. Others: Reflex SI (strongly rounded, thick), Busch-axcent (flat frame with wide border), solo, carat (glass/metal), Busch-dynasty. If you cannot tell, say so in note.
+Other makers occur: lights and drivers (e.g. EVN, Easylux) usually carry the brand and article number on the label; cables are written like "NYM-J 3x1,5" or "J-Y(St)Y 2x2x0,8" and counted in metres.`;
 
 const FIELDS = `Fields (German values):
 - name: short product name as a German electrician would write it, with the key specs, e.g. "SCHUKO-Steckdose mit Klappdeckel" or "LED-Netzteil 24 V DC 18 W IP20".
@@ -49,7 +51,10 @@ const FIELDS = `Fields (German values):
 - variant: e.g. "1-fach", "2-fach", "16 A", "10 m"; else "".
 - color: e.g. "studioweiß", "anthrazit"; else "".
 - model: manufacturer article number, e.g. "1721-184K" or "SLK24018".
-- description: one short German sentence with useful details.`;
+- description: one short German sentence with useful details.
+- order_number: manufacturer order code (for ABB/Busch-Jaeger the 2CKA… code) if known, else "".
+- all_ids: every number and ID you can read or know for this product, comma separated (EAN/GTIN, article number, order code, type numbers, other codes), so the stock list can be priced later.
+- unit: "m" for cable/wire sold by the metre, else "Stück".`;
 
 async function call(prompt, images) {
   const s = await sample();
@@ -83,7 +88,7 @@ ${CATALOG_KEYS}
 Existing catalog: ${JSON.stringify(catalog)}
 Items with EAN only: ${JSON.stringify(textItems)}
 
-Reply with only a JSON object: {"items":[{"ean","name","maker","series","category","variant","color","model","description","confidence","note","ean_on_label"}],"duplicates":[{"ean_a","ean_b","reason"}]}, one entry in "items" for each of these EANs: ${items.map((i) => i.ean).join(', ')}.`;
+Reply with only a JSON object: {"items":[{"ean","name","maker","series","category","variant","color","model","order_number","all_ids","unit","description","confidence","note","ean_on_label"}],"duplicates":[{"ean_a","ean_b","reason"}]}, one entry in "items" for each of these EANs: ${items.map((i) => i.ean).join(', ')}.`;
   const data = await call(prompt, photos.map((p) => p.image));
   return { items: Array.isArray(data?.items) ? data.items : [], duplicates: Array.isArray(data?.duplicates) ? data.duplicates : [], searches: 0 };
 }
@@ -99,15 +104,34 @@ ${FIELDS}
 - match_reason: short German reason.
 - read_text: the IDs and text you read from the product.
 - barcode_digits: digits of an EAN barcode if one is visible, else "".
+- ean: the product's EAN/GTIN if visible or if you are certain of it, else "".
 ${hint ? `Hint from the user: ${hint}` : ''}
 
 ${CATALOG_KEYS}
 Existing catalog: ${JSON.stringify(catalog)}
 
-Reply with only a JSON object with the keys match_code, match_confidence, match_reason, name, maker, series, category, variant, color, model, description, read_text, barcode_digits.`;
-  const r = await call(prompt, [image]);
-  const str = (v) => (typeof v === 'string' ? v : '');
-  return Object.fromEntries(['match_code', 'match_confidence', 'match_reason', 'name', 'maker', 'series', 'category', 'variant', 'color', 'model', 'description', 'read_text', 'barcode_digits'].map((k) => [k, str(r?.[k])]));
+Reply with only a JSON object with the keys ${ID_KEYS.join(', ')}.`;
+  return pick(await call(prompt, [image]));
+}
+
+const ID_KEYS = ['match_code', 'match_confidence', 'match_reason', 'name', 'maker', 'series', 'category', 'variant', 'color', 'model', 'order_number', 'all_ids', 'unit', 'description', 'read_text', 'barcode_digits', 'ean'];
+const pick = (r) => Object.fromEntries(ID_KEYS.map((k) => [k, typeof r?.[k] === 'string' ? r[k] : '']));
+
+// ---------- add a product by name ("Busch-Jaeger Schuko-Steckdose balance SI", "NYM-J 3x1,5") ----------
+export async function lookupText({ text, catalog }) {
+  const prompt = `The user of a German electrical installation company's stock list typed a product: "${text}".
+Work out which product it is. If it is already in the catalog (same article), return its code in match_code. Otherwise describe the product, preferring the exact Busch-Jaeger article when the text fits one.
+${MAKER_HINT}
+${FIELDS}
+- match_code / match_confidence (high, medium, low, none) / match_reason: as for a catalog match.
+- ean: the product's EAN/GTIN only if you are certain of it (13 digits), else "".
+- read_text and barcode_digits: "".
+
+${CATALOG_KEYS}
+Existing catalog: ${JSON.stringify(catalog)}
+
+Reply with only a JSON object with the keys ${ID_KEYS.join(', ')}.`;
+  return pick(await call(prompt));
 }
 
 // ---------- match free-text needs to stock ----------

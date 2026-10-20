@@ -62,10 +62,15 @@ export async function buildWorkbook({ products, log, jobs, needs = [] }, now = D
     ['Zu bestellen (Positionen)', order.length],
     ['Zu bestellen (Stück)', order.reduce((s, o) => s + o.qty, 0)],
     ['Buchungen gesamt', log.length],
+    ['Lagerwert (€, soweit Preise eingetragen)', null],
   ];
+  const valueSum = live.reduce((s, p) => s + (typeof p.price === 'number' ? p.price * Math.max(0, p.qty || 0) : 0), 0);
   kpis.forEach(([k, v], i) => {
     const r = ov.getRow(4 + i);
-    r.getCell(1).value = k; r.getCell(2).value = v;
+    r.getCell(1).value = k;
+    // column P of "Bestand" is "Wert (€)"
+    r.getCell(2).value = v === null ? { formula: `SUM(Bestand!${'$'}P:${'$'}P)`, result: Math.round(valueSum * 100) / 100 } : v;
+    if (v === null) r.getCell(2).numFmt = '#,##0.00 "€"';
     r.getCell(1).font = { color: { argb: C.ink } };
     r.getCell(2).font = { bold: true, size: 13 };
     r.getCell(2).alignment = { horizontal: 'right' };
@@ -105,20 +110,34 @@ export async function buildWorkbook({ products, log, jobs, needs = [] }, now = D
   ov.getCell(`A${row}`).font = { italic: true, color: { argb: C.grey } };
 
   // ---- Bestand ----
-  const stockCols = ['Code', 'Art', 'Kategorie', 'Hersteller', 'Serie', 'Produkt', 'Variante', 'Farbe', 'Artikelnr.', 'Bestand', 'Status', 'Gleiches Produkt wie', 'Weitere Codes', 'Hinweis', 'Beschreibung', 'Quelle', 'Etikett-Text', 'Angelegt', 'Geändert'];
+  const stockCols = ['Code', 'Art', 'Kategorie', 'Hersteller', 'Serie', 'Produkt', 'Variante', 'Farbe', 'Artikelnr.', 'Bestellnr.', 'EAN/GTIN', 'Alle Nummern', 'Bestand', 'Einheit', 'Einzelpreis (€)', 'Wert (€)', 'Status', 'Gleiches Produkt wie', 'Weitere Codes', 'Hinweis', 'Beschreibung', 'Quelle', 'Etikett-Text', 'Angelegt', 'Geändert'];
+  // Every number we know, for pricing the stock later (EAN, article and order numbers, codes read from labels).
+  const allIds = (p) => [...new Set([p.ean, p.model, p.orderNo, ...(p.aliases || []), ...String(p.ids || '').split(/[,;\n]+/)].map((x) => String(x || '').trim()).filter(Boolean))].join(', ');
+  const eanOf = (p) => [p.ean, ...(p.aliases || [])].filter((c) => /^\d{8,14}$/.test(c)).join(', ');
   const sorted = products.slice().sort((a, b) => !!a.aliasOf - !!b.aliasOf
     || cmpText(a.category, b.category) || cmpText(a.maker, b.maker) || cmpText(a.series, b.series) || cmpText(a.name, b.name));
   const st = table(wb.addWorksheet('Bestand', { properties: { tabColor: { argb: 'FF1D7A4F' } } }), stockCols, sorted.map((p) => ({
     Code: p.ean, Art: isTag(p.ean) ? 'Eigener Code' : 'EAN', Kategorie: p.category || '', Hersteller: p.maker || '', Serie: p.series || '',
     Produkt: p.name || '', Variante: p.variant || '', Farbe: p.color || '', 'Artikelnr.': p.model || '',
-    Bestand: p.aliasOf ? 0 : p.qty || 0, Status: p.aliasOf ? 'Zusammengeführt' : STATUS_LABEL[p.status] || p.status || '',
+    'Bestellnr.': p.orderNo || '', 'EAN/GTIN': eanOf(p), 'Alle Nummern': allIds(p),
+    Bestand: p.aliasOf ? 0 : p.qty || 0, Einheit: p.unit === 'm' ? 'm' : 'Stück', 'Einzelpreis (€)': typeof p.price === 'number' ? p.price : null, 'Wert (€)': null, Status: p.aliasOf ? 'Zusammengeführt' : STATUS_LABEL[p.status] || p.status || '',
     'Gleiches Produkt wie': p.aliasOf || '', 'Weitere Codes': (p.aliases || []).join(', '), Hinweis: p.aiNote || '',
     Beschreibung: p.description || '', Quelle: p.source || '', 'Etikett-Text': String(p.ocrText || '').slice(0, 2000),
     Angelegt: dt(p.created), Geändert: dt(p.updated),
   })), {
-    widths: { Code: 17, Art: 12, Kategorie: 18, Hersteller: 18, Serie: 16, Produkt: 42, Variante: 10, Farbe: 12, 'Artikelnr.': 16, Bestand: 9, Status: 18, 'Gleiches Produkt wie': 17, 'Weitere Codes': 20, Hinweis: 34, Beschreibung: 40, Quelle: 30, 'Etikett-Text': 30, Angelegt: 17, Geändert: 17 },
+    widths: { Code: 17, Art: 12, Kategorie: 18, Hersteller: 18, Serie: 16, Produkt: 42, Variante: 10, Farbe: 12, 'Artikelnr.': 16, 'Bestellnr.': 18, 'EAN/GTIN': 16, 'Alle Nummern': 40, Bestand: 9, Einheit: 8, 'Einzelpreis (€)': 13, 'Wert (€)': 12, Status: 18, 'Gleiches Produkt wie': 17, 'Weitere Codes': 20, Hinweis: 34, Beschreibung: 40, Quelle: 30, 'Etikett-Text': 30, Angelegt: 17, Geändert: 17 },
   });
   st.getColumn('Code').numFmt = '@';
+  st.getColumn('EAN/GTIN').numFmt = '@';
+  st.getColumn('Einzelpreis (€)').numFmt = '#,##0.00 "€"';
+  st.getColumn('Wert (€)').numFmt = '#,##0.00 "€"';
+  // Wert = Bestand × Einzelpreis, as a live formula: fill in prices later and the value follows.
+  const B = colLetter(st, 'Bestand'), P = colLetter(st, 'Einzelpreis (€)'), W = colLetter(st, 'Wert (€)');
+  sorted.forEach((p, i) => {
+    const r = i + 2;
+    const v = typeof p.price === 'number' && !p.aliasOf ? Math.round(p.price * (p.qty || 0) * 100) / 100 : 0;
+    st.getCell(`${W}${r}`).value = { formula: `IF(${P}${r}="","",${B}${r}*${P}${r})`, result: typeof p.price === 'number' ? v : '' };
+  });
   st.getColumn('Bestand').font = { bold: true };
   st.getColumn('Bestand').alignment = { horizontal: 'center' };
   ['Angelegt', 'Geändert'].forEach((k) => { st.getColumn(k).numFmt = 'dd.mm.yyyy hh:mm'; });
@@ -163,10 +182,15 @@ export async function buildWorkbook({ products, log, jobs, needs = [] }, now = D
   }
 
   // ---- Bestellliste ----
-  const ordCols = ['Hersteller', 'Artikelnr.', 'Produkt', 'Code', 'Menge', 'Für Bedarfsliste'];
-  const od = table(wb.addWorksheet('Bestellliste', { properties: { tabColor: { argb: 'FFB42318' } } }), ordCols, order.map((o) => ({
-    Hersteller: o.maker, 'Artikelnr.': o.model, Produkt: o.name, Code: o.code, Menge: o.qty, 'Für Bedarfsliste': o.needs.join(', '),
-  })), { widths: { Hersteller: 20, 'Artikelnr.': 18, Produkt: 46, Code: 17, Menge: 9, 'Für Bedarfsliste': 34 } });
+  const ordCols = ['Hersteller', 'Artikelnr.', 'Bestellnr.', 'EAN/GTIN', 'Produkt', 'Code', 'Menge', 'Einheit', 'Für Bedarfsliste'];
+  const od = table(wb.addWorksheet('Bestellliste', { properties: { tabColor: { argb: 'FFB42318' } } }), ordCols, order.map((o) => {
+    const p = o.code ? byEan[o.code] : null;
+    return {
+      Hersteller: o.maker, 'Artikelnr.': o.model, 'Bestellnr.': p?.orderNo || '', 'EAN/GTIN': p ? eanOf(p) : '', Produkt: o.name, Code: o.code,
+      Menge: o.qty, Einheit: p?.unit === 'm' ? 'm' : 'Stück', 'Für Bedarfsliste': o.needs.join(', '),
+    };
+  }), { widths: { Hersteller: 20, 'Artikelnr.': 18, 'Bestellnr.': 18, 'EAN/GTIN': 16, Produkt: 46, Code: 17, Menge: 9, Einheit: 8, 'Für Bedarfsliste': 34 } });
+  od.getColumn('EAN/GTIN').numFmt = '@';
   od.getColumn('Menge').font = { bold: true };
   od.getColumn('Menge').alignment = { horizontal: 'center' };
   od.getColumn('Code').numFmt = '@';
@@ -245,6 +269,8 @@ export async function parseWorkbook(buf) {
     return {
       ean: str(r.Code), name: str(r.Produkt), maker: str(r.Hersteller), series: str(r.Serie), category: str(r.Kategorie),
       variant: str(r.Variante), color: str(r.Farbe), model: str(r['Artikelnr.']), description: str(r.Beschreibung), source: str(r.Quelle),
+      orderNo: str(r['Bestellnr.']), ids: str(r['Alle Nummern']), unit: str(r.Einheit) === 'm' ? 'm' : 'Stück',
+      price: r['Einzelpreis (€)'] === '' || r['Einzelpreis (€)'] == null || isNaN(Number(r['Einzelpreis (€)'])) ? null : Number(r['Einzelpreis (€)']),
       qty: Number(r.Bestand) || 0, status: status === 'new' ? 'manual' : status,
       aliasOf: str(r['Gleiches Produkt wie']) || null,
       aliases: str(r['Weitere Codes']).split(',').map((s) => s.trim()).filter(Boolean),

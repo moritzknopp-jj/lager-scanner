@@ -5,7 +5,7 @@ import { buildWorkbook, workbookBytes, parseWorkbook } from '../../src/excel.js'
 const T = (s) => Date.parse(s);
 const data = {
   products: [
-    { ean: '4037293393362', name: 'LED-Netzteil 24 V DC 18 W IP20', maker: 'EVN Lichttechnik', series: '', category: 'Netzteil/Treiber', variant: '18 W', model: 'SLK24018', qty: 6, status: 'verified', aliases: ['0012345678905'], aliasOf: null, source: 'https://evn.example', created: T('2026-10-20T07:00:00Z'), updated: T('2026-10-20T08:00:00Z') },
+    { ean: '4037293393362', name: 'LED-Netzteil 24 V DC 18 W IP20', maker: 'EVN Lichttechnik', series: '', category: 'Netzteil/Treiber', variant: '18 W', model: 'SLK24018', orderNo: 'EVN-SLK24018', ids: 'SLK24018, 191120', price: 12.49, qty: 6, status: 'verified', aliases: ['0012345678905'], aliasOf: null, source: 'https://evn.example', created: T('2026-10-20T07:00:00Z'), updated: T('2026-10-20T08:00:00Z') },
     { ean: '0012345678905', name: 'LED-Netzteil', qty: 0, status: 'verified', aliases: [], aliasOf: '4037293393362', created: 1, updated: 2 },
     { ean: 'T-FINDER-40-52', name: 'Relais 2 Wechsler 24 V', maker: 'Finder', category: 'Relais', model: '40.52', qty: 0, status: 'verified', aliases: [], aliasOf: null, created: 1, updated: 2 },
     { ean: '96385074', name: '', qty: 3, status: 'manual', aliases: [], aliasOf: null, created: 1, updated: 2 },
@@ -56,6 +56,25 @@ describe('Excel workbook', () => {
     expect(rows(st).find((r) => r.Code === 'T-FINDER-40-52').Art).toBe('Eigener Code');
   });
 
+  it('puts every known number in, with price and value columns for later', async () => {
+    const wb = await readBack(await workbookBytes(await buildWorkbook(data)));
+    const evn = rows(wb.getWorksheet('Bestand')).find((r) => r['Artikelnr.'] === 'SLK24018');
+    expect(evn['Bestellnr.']).toBe('EVN-SLK24018');
+    expect(evn['EAN/GTIN']).toBe('4037293393362, 0012345678905');
+    expect(evn['Alle Nummern']).toBe('4037293393362, SLK24018, EVN-SLK24018, 0012345678905, 191120');
+    expect(evn.Einheit).toBe('Stück');
+    expect(evn['Einzelpreis (€)']).toBe(12.49);
+    expect(evn['Wert (€)'].formula).toMatch(/^IF\(O\d+="","",M\d+\*O\d+\)$/);
+    expect(evn['Wert (€)'].result).toBe(74.94);
+    const ov = wb.getWorksheet('Übersicht');
+    let total = null;
+    ov.eachRow((r) => { if (String(r.getCell(1).value).startsWith('Lagerwert')) total = r.getCell(2).value; });
+    expect(total.formula).toBe('SUM(Bestand!$P:$P)');
+    expect(total.result).toBe(74.94);
+    const ord = rows(wb.getWorksheet('Bestellliste'));
+    expect(ord[0]).toMatchObject({ 'Bestellnr.': 'EVN-SLK24018', 'EAN/GTIN': '4037293393362, 0012345678905', Einheit: 'Stück' });
+  });
+
   it('shows the needs list with what is there and what is missing', async () => {
     const wb = await readBack(await workbookBytes(await buildWorkbook(data)));
     const nd = rows(wb.getWorksheet('Bedarf'));
@@ -72,7 +91,8 @@ describe('Excel workbook', () => {
   it('reads back everything it wrote', async () => {
     const back = await parseWorkbook(await workbookBytes(await buildWorkbook(data)));
     const evn = back.products.find((p) => p.ean === '4037293393362');
-    expect(evn).toMatchObject({ qty: 6, model: 'SLK24018', category: 'Netzteil/Treiber', aliases: ['0012345678905'], aliasOf: null, status: 'verified', source: 'https://evn.example' });
+    expect(evn).toMatchObject({ qty: 6, model: 'SLK24018', orderNo: 'EVN-SLK24018', price: 12.49, unit: 'Stück', category: 'Netzteil/Treiber', aliases: ['0012345678905'], aliasOf: null, status: 'verified', source: 'https://evn.example' });
+    expect(evn.ids).toContain('191120');
     expect(back.products.find((p) => p.ean === '0012345678905').aliasOf).toBe('4037293393362');
     expect(back.products.find((p) => p.ean === '96385074').status).toBe('manual');
     expect(back.log[1]).toMatchObject({ id: 'a2', k: 'out', q: -24, j: 'J1', t: data.log[1].t });

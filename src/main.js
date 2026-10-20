@@ -64,6 +64,14 @@ function statusPill(p) {
   const cls = { new: 'warn', ocr: 'warn', error: 'bad', manual: 'bad', verified: 'ok', edited: 'ok' }[p.status] || '';
   return `<span class="pill ${cls}">${esc(STATUS_LABEL[p.status] || p.status)}</span>`;
 }
+// All numbers known for a product, without duplicates (for pricing it later).
+function mergeIds(...parts) {
+  const out = [];
+  for (const part of parts) for (const x of String(part || '').split(/[,;\n]+/)) { const t = x.trim(); if (t && !out.includes(t)) out.push(t); }
+  return out.join(', ');
+}
+const unitOf = (p) => (p?.unit === 'm' ? 'm' : '');
+const looksLikeText = (v) => /\s/.test(v.trim()) || /[a-zäöüß]/.test(v);
 const needsAttention = (p) => !p.aliasOf && ['new', 'ocr', 'error', 'manual'].includes(p.status);
 const catOptions = (sel) => ['', ...CATEGORIES].map((c) => `<option value="${esc(c)}" ${c === (sel || '') ? 'selected' : ''}>${esc(c || '– Kategorie –')}</option>`).join('');
 
@@ -209,12 +217,13 @@ function qtySheet(code, { isNew = false, note = '' } = {}) {
   const p = master(code);
   const inBasket = S.basket.find((l) => l.ean === p.ean)?.qty || 0;
   const verb = S.mode === 'out' ? 'entnehmen' : 'hinzufügen';
+  const u = unitOf(p);
   openSheet(`
-    <div class="top"><h2>Wie viele ${verb}?</h2><button class="small" data-act="close">Abbrechen</button></div>
+    <div class="top"><h2>${u ? 'Wie viele Meter' : 'Wie viele'} ${verb}?</h2><button class="small" data-act="close">Abbrechen</button></div>
     <div class="panel">
       <b>${esc(p.name || (isNew ? 'Neues Produkt' : 'Unbenanntes Produkt'))}</b>
       ${subline(p) ? `<span class="muted">${esc(subline(p))}</span>` : ''}
-      <span class="muted"><span class="mono">${esc(p.ean)}</span> · Bestand ${p.qty || 0}${inBasket ? ` · schon im Korb: ${inBasket}` : ''}</span>
+      <span class="muted"><span class="mono">${esc(p.ean)}</span> · Bestand ${p.qty || 0}${u ? ' m' : ''}${inBasket ? ` · schon im Korb: ${inBasket}${u ? ' m' : ''}` : ''}</span>
       ${note ? `<span>${esc(note)}</span>` : ''}
       ${isNew ? `<span class="muted">Neu angelegt${aiOn() ? ' – Claude erkennt es am Foto' : ''}.</span>` : ''}
     </div>
@@ -224,7 +233,7 @@ function qtySheet(code, { isNew = false, note = '' } = {}) {
       <button data-act="q-step" data-d="1" aria-label="Eins mehr">+</button>
     </div>
     <div class="row wrap-gap quick">${[1, 5, 10, 20, 50].map((n) => `<button class="small" data-act="q-set" data-n="${n}">${n}</button>`).join('')}</div>
-    <button class="primary big" data-act="q-ok" id="qs-ok">+1 in den Korb</button>
+    <button class="primary big" data-act="q-ok" id="qs-ok">+1${u ? ' m' : ''} in den Korb</button>
   `, async (act, el) => {
     const inp = $('qs-qty');
     if (act === 'close') closeSheet();
@@ -238,41 +247,42 @@ function qtySheet(code, { isNew = false, note = '' } = {}) {
     }
   });
   const inp = $('qs-qty');
-  const label = () => { $('qs-ok').textContent = `+${Math.max(1, parseInt(inp.value, 10) || 1)} in den Korb`; };
+  const label = () => { $('qs-ok').textContent = `+${Math.max(1, parseInt(inp.value, 10) || 1)}${u ? ' m' : ''} in den Korb`; };
   inp.addEventListener('input', label);
   inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('qs-ok').click(); } });
   inp.focus(); inp.select();
 }
 
 // ---------- products without barcode ----------
-function identifySheet(blob) {
-  const url = URL.createObjectURL(blob);
-  const ai = aiImages();
+function identifySheet(blob, { text = '' } = {}) {
+  const url = blob ? URL.createObjectURL(blob) : '';
+  const ai = blob ? aiImages() : aiOn();
   openSheet(`
-    <div class="top"><h2>Kein Barcode gefunden</h2><button class="small" data-act="close">Abbrechen</button></div>
-    <img class="thumb" src="${url}" alt="Foto des Produkts">
+    <div class="top"><h2>${blob ? 'Kein Barcode gefunden' : 'Produkt hinzufügen'}</h2><button class="small" data-act="close">Abbrechen</button></div>
+    ${url ? `<img class="thumb" src="${url}" alt="Foto des Produkts">` : `<div><b>„${esc(text)}“</b></div>`}
     <div id="id-result">${ai ? '<div class="msg info">Claude erkennt das Produkt…</div>' : ''}</div>
     <div class="row" id="id-actions" ${ai ? 'hidden' : ''}>
-      <input id="id-hint" class="grow" placeholder="Hinweis, z.B. „Busch-Jaeger Rahmen 2-fach“">
+      <input id="id-hint" class="grow" placeholder="${blob ? 'Hinweis, z.B. „Busch-Jaeger Rahmen 2-fach“' : 'Genauer beschreiben'}" value="${esc(text)}">
       ${ai ? '<button data-act="identify">Nochmal erkennen</button>' : ''}
     </div>
     <button class="ghost" data-act="manual-new" id="id-manual">${ai ? 'Selbst anlegen' : 'Produkt anlegen'}</button>
     ${ai ? '' : `<span class="muted">${ARTIFACT ? 'Claude ist gerade nicht verfügbar (z.B. Zugriff abgelehnt oder Limit erreicht).' : 'Mit einem API-Schlüssel in den Einstellungen erkennt Claude das Produkt am Foto.'}</span>`}
   `, async (act, el) => {
-    if (act === 'close') { closeSheet(); URL.revokeObjectURL(url); }
+    if (act === 'close') { closeSheet(); if (url) URL.revokeObjectURL(url); }
     if (act === 'identify') await runIdentify(blob);
-    if (act === 'manual-new') showNewForm({});
-    if (act === 'use-match') { closeSheet(); URL.revokeObjectURL(url); qtySheet(el.dataset.code, { note: el.dataset.note }); }
+    if (act === 'manual-new') showNewForm(blob ? {} : { name: ($('id-hint')?.value || text).trim() });
+    if (act === 'use-match') { closeSheet(); if (url) URL.revokeObjectURL(url); qtySheet(el.dataset.code, { note: el.dataset.note }); }
     if (act === 'create-new') {
       const f = readNewForm();
       if (!f.name) { toast('Bitte mindestens einen Namen eingeben.'); return; }
       const qty = Math.max(1, parseInt($('nf-qty').value, 10) || 1);
       const code = await createTagged(f, blob);
-      closeSheet(); URL.revokeObjectURL(url);
+      closeSheet(); if (url) URL.revokeObjectURL(url);
       await addToBasket(code, qty);
     }
   });
   if (ai) runIdentify(blob);
+  else if (!blob) showNewForm({ name: text });
 }
 
 async function runIdentify(blob) {
@@ -280,10 +290,13 @@ async function runIdentify(blob) {
   res.innerHTML = '<div class="msg info">Claude erkennt das Produkt…</div>';
   $('id-actions').hidden = true;
   try {
-    const { identifyPhoto, compactCatalog } = await lazyAi();
-    const r = await identifyPhoto({ apiKey: setting('apiKey', ''), image: blob, hint: ($('id-hint')?.value || '').trim(), catalog: compactCatalog(S.products) });
+    const { identifyPhoto, lookupText, compactCatalog } = await lazyAi();
+    const hint = ($('id-hint')?.value || '').trim();
+    const r = blob
+      ? await identifyPhoto({ apiKey: setting('apiKey', ''), image: blob, hint, catalog: compactCatalog(S.products) })
+      : await lookupText({ apiKey: setting('apiKey', ''), text: hint, catalog: compactCatalog(S.products) });
     if (!$('id-result')) return; // sheet closed meanwhile
-    const digits = normalizeCode(r.barcode_digits || '').code;
+    const digits = normalizeCode(r.barcode_digits || r.ean || '').code;
     const m = r.match_code && S.products[r.match_code] ? master(r.match_code) : digits && S.products[digits] ? master(digits) : null;
     $('id-actions').hidden = false;
     if (m && r.match_confidence !== 'low' && r.match_confidence !== 'none') {
@@ -291,7 +304,7 @@ async function runIdentify(blob) {
         <div class="row"><button class="primary grow" data-act="use-match" data-code="${esc(m.ean)}" data-note="${esc('Erkannt: ' + (r.match_reason || ''))}">Weiter: Anzahl</button><button class="grow" data-act="manual-new">Anderes Produkt</button></div>`;
       return;
     }
-    showNewForm({ ...r, code: digits || '' }, r.read_text ? `Gelesen: ${r.read_text}` : '');
+    showNewForm({ ...r, code: digits || '', fromKnowledge: !blob || !r.barcode_digits }, r.read_text ? `Gelesen: ${r.read_text}` : '');
   } catch (e) {
     if (!$('id-result')) return;
     res.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
@@ -309,7 +322,10 @@ function showNewForm(f, note = '') {
       <div class="row"><select id="nf-cat" class="grow">${catOptions(f.category)}</select><input id="nf-variant" class="grow" placeholder="Variante, z.B. 2-fach" value="${esc(f.variant || '')}"></div>
       <div class="row"><input id="nf-maker" class="grow" placeholder="Hersteller" value="${esc(f.maker || '')}"><input id="nf-series" class="grow" placeholder="Serie" value="${esc(f.series || '')}"></div>
       <div class="row"><input id="nf-model" class="grow" placeholder="Artikel-/Typnummer" value="${esc(f.model || '')}"><input id="nf-color" class="grow" placeholder="Farbe" value="${esc(f.color || '')}"></div>
+      <div class="row"><input id="nf-order" class="grow" placeholder="Bestellnr. (z.B. 2CKA…)" value="${esc(f.order_number || '')}"><select id="nf-unit" class="grow" aria-label="Einheit">${['Stück', 'm'].map((u) => `<option ${((f.unit === 'm' ? 'm' : 'Stück') === u) ? 'selected' : ''}>${u}</option>`).join('')}</select></div>
+      <input id="nf-ids" placeholder="Alle Nummern (EAN, Artikel-, Bestellnr. …)" value="${esc(mergeIds(f.code, f.model, f.order_number, f.all_ids))}">
       <input type="hidden" id="nf-code" value="${esc(f.code || '')}">
+      <input type="hidden" id="nf-know" value="${f.fromKnowledge && f.code ? '1' : ''}">
       <input type="hidden" id="nf-desc" value="${esc(f.description || '')}">
       <input type="hidden" id="nf-read" value="${esc(f.read_text || '')}">
       <div class="row"><label class="label" for="nf-qty" style="flex:0 0 auto">Anzahl</label><input id="nf-qty" type="number" inputmode="numeric" min="1" value="1" style="max-width:110px"></div>
@@ -318,7 +334,7 @@ function showNewForm(f, note = '') {
 }
 function readNewForm() {
   const v = (id) => ($(id)?.value || '').trim();
-  return { name: v('nf-name'), category: v('nf-cat'), variant: v('nf-variant'), maker: v('nf-maker'), series: v('nf-series'), model: v('nf-model'), color: v('nf-color'), code: v('nf-code'), description: v('nf-desc'), read: v('nf-read') };
+  return { name: v('nf-name'), category: v('nf-cat'), variant: v('nf-variant'), maker: v('nf-maker'), series: v('nf-series'), model: v('nf-model'), color: v('nf-color'), code: v('nf-code'), description: v('nf-desc'), read: v('nf-read'), orderNo: v('nf-order'), ids: v('nf-ids'), unit: v('nf-unit') === 'm' ? 'm' : 'Stück', fromKnowledge: !!v('nf-know') };
 }
 
 async function createTagged(f, blob) {
@@ -326,7 +342,9 @@ async function createTagged(f, blob) {
   const now = Date.now();
   const p = {
     ean: code, name: f.name, maker: f.maker, series: f.series, category: f.category, variant: f.variant, color: f.color, model: f.model,
-    description: f.description, ocrText: f.read, qty: 0, status: 'verified', aliases: [], aliasOf: null, hasImage: !!blob, created: now, updated: now,
+    description: f.description, ocrText: f.read, orderNo: f.orderNo || '', ids: mergeIds(code, f.ids), unit: f.unit || 'Stück',
+    qty: 0, status: 'verified', aliases: [], aliasOf: null, hasImage: !!blob, created: now, updated: now,
+    ...(f.fromKnowledge && !isTag(code) ? { aiNote: 'EAN aus Claudes Produktwissen, nicht vom Etikett. Beim ersten Scan des echten Barcodes prüfen.' } : {}),
   };
   S.products[code] = p;
   await store.putProduct(p);
@@ -436,6 +454,7 @@ async function maybeRunCheck(force = false) {
       const np = {
         ...cur, name: pick('name'), maker: pick('maker'), series: pick('series'), category: pick('category'), variant: pick('variant'),
         color: pick('color'), model: pick('model'), description: pick('description'), source: r.source || cur.source || '',
+        orderNo: r.order_number || cur.orderNo || '', ids: mergeIds(cur.ids, r.all_ids, p.ean), unit: r.unit === 'm' ? 'm' : cur.unit || 'Stück',
         status: good ? 'verified' : 'manual',
         aiNote: mismatch ? `Etikett zeigt EAN ${onLabel}, gescannt wurde ${p.ean}. Bitte prüfen.` : r.note || (good ? '' : 'Claude war sich nicht sicher. Bitte prüfen.'),
         checkedAt: Date.now(), updated: Date.now(),
@@ -718,7 +737,7 @@ function renderRecent() { $('recent').innerHTML = S.recent.length ? S.recent.map
 function productRow(p) {
   return `<button class="item" data-act="product" data-ean="${esc(p.ean)}">
     <span class="t">${esc(p.name || 'Unbenanntes Produkt')} ${needsAttention(p) ? statusPill(p) : ''}</span>
-    <span class="n ${(p.qty || 0) > 0 ? '' : 'zero'}">${p.qty || 0}</span>
+    <span class="n ${(p.qty || 0) > 0 ? '' : 'zero'}">${p.qty || 0}${unitOf(p) ? '<small> m</small>' : ''}</span>
     <span class="s">${esc(subline(p))}${subline(p) ? ' · ' : ''}<span class="mono">${esc(p.ean)}</span>${(p.aliases || []).length ? ` +${p.aliases.length}` : ''}</span>
   </button>`;
 }
@@ -916,6 +935,10 @@ async function productSheet(code) {
       <div class="row"><input id="pf-maker" class="grow" placeholder="Hersteller" aria-label="Hersteller" value="${v('maker')}"><input id="pf-series" class="grow" placeholder="Serie" aria-label="Serie" value="${v('series')}"></div>
       <div class="row"><input id="pf-model" class="grow" placeholder="Artikelnr." aria-label="Artikelnummer" value="${v('model')}"><input id="pf-color" class="grow" placeholder="Farbe" aria-label="Farbe" value="${v('color')}"></div>
       <input id="pf-desc" placeholder="Beschreibung" aria-label="Beschreibung" value="${v('description')}">
+      <div class="row"><input id="pf-order" class="grow" placeholder="Bestellnr. (z.B. 2CKA…)" aria-label="Bestellnummer" value="${v('orderNo')}"><select id="pf-unit" class="grow" aria-label="Einheit">${['Stück', 'm'].map((x) => `<option ${(unitOf(p) || 'Stück') === x ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
+      <label class="label" for="pf-ids">Alle Nummern (für spätere Preisrecherche)</label>
+      <input id="pf-ids" aria-label="Alle Nummern" value="${esc(mergeIds(p.ean, p.model, p.orderNo, p.ids))}">
+      <div class="row"><label class="label" for="pf-price" style="flex:0 0 auto">Einzelpreis €</label><input id="pf-price" class="grow" type="number" inputmode="decimal" step="0.01" min="0" placeholder="später" value="${p.price ?? ''}"></div>
       <div class="row"><button class="primary grow" data-act="save">Speichern</button>${aiOn() ? '<button class="grow" data-act="research">Neu recherchieren</button>' : ''}</div>
       ${p.source ? `<span class="muted">Quelle: <a href="${esc(p.source)}" target="_blank" rel="noopener">${esc(p.source.slice(0, 60))}</a></span>` : ''}
     </div>
@@ -943,6 +966,8 @@ async function productSheet(code) {
       const np = {
         ...S.products[code], name: val('pf-name'), category: val('pf-cat'), variant: val('pf-variant'), maker: val('pf-maker'),
         series: val('pf-series'), model: val('pf-model'), color: val('pf-color'), description: val('pf-desc'), updated: Date.now(),
+        orderNo: val('pf-order'), ids: mergeIds(val('pf-ids')), unit: val('pf-unit') === 'm' ? 'm' : 'Stück',
+        price: val('pf-price') === '' ? null : Math.round(parseFloat(val('pf-price').replace(',', '.')) * 100) / 100,
         ...(act === 'save' ? { status: 'edited', aiNote: '' } : { status: 'ocr', checkTries: 0, aiNote: '' }),
       };
       S.products[code] = np; await store.putProduct(np);
@@ -1117,7 +1142,9 @@ function bind() {
   $('codeForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const val = $('codeInput').value; $('codeInput').value = '';
-    if (val.trim()) await handleCode(val, 'key', null);
+    if (!val.trim()) return;
+    if (looksLikeText(val)) { identifySheet(null, { text: val.trim() }); return; } // a product name, not a barcode
+    await handleCode(val, 'key', null);
     $('codeInput').focus();
   });
   $('basketBook').onclick = bookBasket;

@@ -13,7 +13,7 @@ async function openArtifact(page, { dbKey = 'k' + Math.random().toString(36).sli
   const calls = [];
   const files = {};
   await page.exposeFunction('__sampleReply', (prompt, nImages, model, tier) => {
-    const kind = /identify products for the stock list[\s\S]*Each item was scanned/.test(prompt) ? 'research' : /from the attached photo/.test(prompt) ? 'identify' : /needs list/.test(prompt) ? 'match' : 'other';
+    const kind = /identify products for the stock list[\s\S]*Each item was scanned/.test(prompt) ? 'research' : /from the attached photo/.test(prompt) ? 'identify' : /typed a product/.test(prompt) ? 'lookup' : /needs list/.test(prompt) ? 'match' : 'other';
     calls.push({ kind, prompt, nImages, model, tier });
     return reply(kind, prompt, nImages, model);
   });
@@ -203,4 +203,77 @@ test('Korb mit Produkt, das nie gespeichert wurde (alter Fehler): wird repariert
   await book(page);
   await expect(page.locator('#scanMsg')).toContainText('Eingebucht: 3 Stück');
   expect((await product(page, EVN)).qty).toBe(3);
+});
+
+test('Produkt per Name: Busch-Jaeger Schuko-Steckdose mit EAN aus Claudes Wissen, Kabel in Metern', async ({ page }) => {
+  const SCHUKO = ean13('401139507314');
+  const { calls } = await openArtifact(page, {
+    reply: (kind, prompt) => {
+      if (kind !== 'lookup') return {};
+      const empty = { match_code: '', match_confidence: 'none', match_reason: '', series: '', variant: '', color: '', description: '', read_text: '', barcode_digits: '' };
+      if (/NYM/.test(prompt.match(/typed a product: "([^"]+)"/)?.[1] || "")) return { ...empty, name: 'Mantelleitung NYM-J 3x1,5 mm²', maker: '', category: 'Kabel/Leitung', model: 'NYM-J 3x1,5', order_number: '', all_ids: 'NYM-J 3x1,5', unit: 'm', ean: '' };
+      return { ...empty, name: 'SCHUKO-Steckdose mit erhöhtem Berührungsschutz', maker: 'Busch-Jaeger', series: 'Busch-balance SI', category: 'Steckdose', color: 'alpinweiß', model: '20 EUC-914', order_number: '2CKA002011A3920', all_ids: '20 EUC-914, 2CKA002011A3920, ' + SCHUKO, unit: 'Stück', ean: SCHUKO };
+    },
+  });
+  await page.fill('#codeInput', 'Busch-Jaeger Schuko-Steckdose balance SI');
+  await page.press('#codeInput', 'Enter');
+  await expect(page.locator('#nf-name')).toHaveValue('SCHUKO-Steckdose mit erhöhtem Berührungsschutz');
+  await expect(page.locator('#nf-order')).toHaveValue('2CKA002011A3920');
+  await expect(page.locator('.sheet')).toContainText(`EAN ${SCHUKO} erkannt`);
+  await page.fill('#nf-qty', '20');
+  await page.click('.sheet [data-act=create-new]');
+  await expect(page.locator(`#q-${SCHUKO}`)).toHaveValue('20');
+  const p = await product(page, SCHUKO);
+  expect(p).toMatchObject({ maker: 'Busch-Jaeger', model: '20 EUC-914', orderNo: '2CKA002011A3920', unit: 'Stück' });
+  expect(p.ids).toContain('2CKA002011A3920');
+  expect(p.aiNote).toContain('nicht vom Etikett');
+  const look = calls.find((c) => c.kind === 'lookup');
+  expect(look.prompt).toContain('Busch-Jaeger first');
+  expect(look.prompt).toContain('future linear');
+
+  // Cable: counted in metres.
+  await page.fill('#codeInput', 'NYM-J 3x1,5');
+  await page.press('#codeInput', 'Enter');
+  await expect(page.locator('#nf-unit')).toHaveValue('m');
+  await page.fill('#nf-qty', '50');
+  await page.click('.sheet [data-act=create-new]');
+  const cable = Object.values(await page.evaluate(() => window.__lager.state.products)).find((x) => x.unit === 'm');
+  expect(cable).toMatchObject({ name: 'Mantelleitung NYM-J 3x1,5 mm²', category: 'Kabel/Leitung' });
+  await expect(page.locator(`#q-${cable.ean}`)).toHaveValue('50');
+  await book(page);
+  await page.click('.tabs [data-view=stock]');
+  await expect(page.locator(`#stockList [data-ean="${cable.ean}"] .n`)).toHaveText('50 m');
+});
+
+test('Recherche übernimmt alle Nummern ins Produkt und in Excel', async ({ page }) => {
+  const { files } = await openArtifact(page, {
+    reply: (kind, prompt) => kind === 'research'
+      ? { items: eansIn(prompt).map((e) => ({ ean: e, name: 'Rahmen 2-fach Busch-balance SI alpinweiß', maker: 'Busch-Jaeger', series: 'Busch-balance SI', category: 'Rahmen', variant: '2-fach', color: 'alpinweiß', model: '1722-914', order_number: '2CKA001725A1558', all_ids: `1722-914, 2CKA001725A1558, 2CKA001718Z2654, ${e}`, unit: 'Stück', description: '', confidence: 'high', note: '', ean_on_label: e })), duplicates: [] }
+      : {},
+  });
+  await page.click('#openSettings');
+  await page.selectOption('#set-batch', '1');
+  await page.click('.sheet [data-act=save-settings]');
+  await page.setInputFiles('#scanInput', path.join(FIX, 'barcode.png'));
+  await page.fill('#qs-qty', '5');
+  await page.click('#qs-ok');
+  await expect.poll(async () => (await product(page, EVN))?.status, { timeout: 15_000 }).toBe('verified');
+  const p = await product(page, EVN);
+  expect(p).toMatchObject({ model: '1722-914', orderNo: '2CKA001725A1558', series: 'Busch-balance SI' });
+  expect(p.ids).toContain('2CKA001718Z2654');
+  await book(page);
+  await page.click('#openExcel');
+  await page.click('.sheet [data-act=excel-save]');
+  await expect.poll(() => Object.keys(files).length).toBe(1);
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(Object.values(files)[0]);
+  const st = wb.getWorksheet('Bestand');
+  const head = st.getRow(1).values;
+  const row = st.getRow(2).values;
+  expect(row[head.indexOf('Bestellnr.')]).toBe('2CKA001725A1558');
+  expect(row[head.indexOf('EAN/GTIN')]).toBe(EVN);
+  expect(row[head.indexOf('Alle Nummern')]).toContain('2CKA001718Z2654');
+  expect(row[head.indexOf('Bestand')]).toBe(5);
+  expect(head).toContain('Einzelpreis (€)');
+  expect(head).toContain('Wert (€)');
 });
