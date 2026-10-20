@@ -24,6 +24,9 @@ jobs:
       - run: npx playwright test
         env:
           CI: '1'
+      - run: npx playwright test -c playwright.artifact.config.js
+        env:
+          CI: '1'
 
   deploy:
     needs: test
