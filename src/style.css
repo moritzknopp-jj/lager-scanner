@@ -18,13 +18,19 @@
   --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
   color-scheme: light;
 }
+:root[data-theme="light"] { color-scheme: light; }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #12171c; --surface: #1b232b; --line: #2e3a45; --fg: #e8edf1; --muted: #93a2b0;
     --accent: #ff7a3d; --accent-fg: #1a0d05; --in: #5fd39b; --in-bg: #16342a; --out: #f2b75b; --out-bg: #3a2c13;
     --warn-bg: #3a2c13; --bad: #ff8a80; --bad-bg: #3d1c1a; color-scheme: dark;
   }
 }
+:root[data-theme="dark"] {
+    --bg: #12171c; --surface: #1b232b; --line: #2e3a45; --fg: #e8edf1; --muted: #93a2b0;
+    --accent: #ff7a3d; --accent-fg: #1a0d05; --in: #5fd39b; --in-bg: #16342a; --out: #f2b75b; --out-bg: #3a2c13;
+    --warn-bg: #3a2c13; --bad: #ff8a80; --bad-bg: #3d1c1a; color-scheme: dark;
+  }
 * { box-sizing: border-box; }
 html, body { margin: 0; min-height: 100%; }
 body { background: var(--bg); color: var(--fg); font: 16px/1.45 var(--font-body); -webkit-text-size-adjust: 100%; }
@@ -166,3 +172,5 @@ details pre { white-space: pre-wrap; font-size: .8rem; background: var(--bg); pa
 .label-card img { flex: 0 0 auto; border-radius: 8px; background: #fff; padding: 4px; }
 .danger-bg { background: var(--bad); border-color: var(--bad); color: #fff; }
 textarea { font: 14px/1.4 var(--font-mono); }
+.btn.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.big-btn { min-height: 56px; font-size: 1.1rem; }

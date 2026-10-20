@@ -7,7 +7,9 @@
     "build": "vite build",
     "preview": "vite preview --port 4173 --strictPort",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "build:artifact": "vite build --mode artifact && node scripts/artifact-page.mjs dist-artifact",
+    "test:artifact": "playwright test -c playwright.artifact.config.js"
   },
   "license": "UNLICENSED",
   "dependencies": {

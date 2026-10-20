@@ -11,8 +11,12 @@ const lazyAi = () => import('./ai.js');
 const lazyExcel = () => import('./excel.js');
 const lazyQr = () => import('qrcode');
 
+// Built twice: for GitHub Pages (Claude via API key) and as a claude.ai artifact (Claude via the subscription).
+const ARTIFACT = typeof __ARTIFACT__ !== 'undefined' && __ARTIFACT__;
+const DEFAULT_BATCH = ARTIFACT ? 5 : 10;
+
 const params = new URLSearchParams(location.search);
-store.openStore(params.get('db') || undefined);
+const storeReady = store.openStore(params.get('db') || undefined);
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -28,7 +32,9 @@ const S = {
   dirty: 0, savedAt: 0, fileHandle: null, fileOk: false,
 };
 const guard = new RepeatGuard();
-const setting = (k, d) => (S.meta[k] === undefined ? d : S.meta[k]);
+const setting = (k, d) => (S.meta[k] === undefined || S.meta[k] === null ? d : S.meta[k]);
+const aiOn = () => (ARTIFACT ? !!S.ai?.text : !!setting('apiKey', ''));
+const aiImages = () => (ARTIFACT ? !!S.ai?.images : aiOn());
 async function setSetting(k, v) { S.meta[k] = v; await store.setMeta(k, v); }
 
 // ---------- small UI helpers ----------
@@ -113,8 +119,13 @@ async function readNewLabel(code, imagePromise) {
     p = { ...p, status: 'ocr', ocrText: '', aiNote: '', updated: Date.now() };
     S.products[code] = p; await store.putProduct(p); renderAll(); maybeRunCheck(); return;
   }
-  await store.putImage(code, blob);
+  await store.putImage(code, await shrinkPhoto(blob, 1400).catch(() => blob));
   p = { ...S.products[code], hasImage: true };
+  if (ARTIFACT) {
+    // claude.ai version: no on-device text reading; Claude looks at the photo itself.
+    p = { ...p, status: 'ocr', aiNote: '', updated: Date.now() };
+    S.products[code] = p; await store.putProduct(p); renderAll(); maybeRunCheck(); return;
+  }
   S.products[code] = p; await store.putProduct(p);
   try {
     const ocr = window.__lagerTestOcr ? await window.__lagerTestOcr(blob) : await (await lazyOcr()).readLabel(blob);
@@ -190,7 +201,7 @@ async function startIdentify() {
 
 function identifySheet(blob, preset = {}) {
   const url = URL.createObjectURL(blob);
-  const hasKey = !!setting('apiKey', '');
+  const hasKey = aiImages();
   openSheet(`
     <div class="top"><h2>Produkt ohne Barcode</h2><button class="small" data-act="close">Abbrechen</button></div>
     <img class="thumb" src="${url}" alt="Foto des Produkts">
@@ -204,7 +215,7 @@ function identifySheet(blob, preset = {}) {
       ${hasKey ? '<button class="primary grow" data-act="identify">Mit Claude erkennen</button>' : ''}
       <button class="grow" data-act="manual-new">${hasKey ? 'Selbst anlegen' : 'Anlegen'}</button>
     </div>
-    ${hasKey ? '' : '<span class="muted">Mit einem API-Schlüssel in den Einstellungen erkennt Claude das Produkt am Foto und findet es beim nächsten Mal wieder.</span>'}
+    ${hasKey ? '' : `<span class="muted">${ARTIFACT ? 'Claude ist gerade nicht verfügbar (z.B. Zugriff abgelehnt oder Limit erreicht).' : 'Mit einem API-Schlüssel in den Einstellungen erkennt Claude das Produkt am Foto und findet es beim nächsten Mal wieder.'}</span>`}
   `, async (act, el) => {
     const qty = Math.max(1, parseInt($('id-qty').value, 10) || 1);
     if (act === 'close') { closeSheet(); URL.revokeObjectURL(url); }
@@ -341,9 +352,9 @@ function checkStats() {
 async function maybeRunCheck(force = false) {
   if (S.checking) return;
   const apiKey = setting('apiKey', '');
-  if (!apiKey) { renderAll(); return; }
+  if (!aiOn()) { renderAll(); return; }
   if (!force && Date.now() < S.checkRetryAt) return;
-  const batchSize = setting('batchSize', 10);
+  const batchSize = setting('batchSize', DEFAULT_BATCH);
   if (!force && !shouldRunCheck(S.products, batchSize).run) return;
   const candidates = Object.values(S.products).filter((p) => !p.aliasOf && (p.status === 'ocr' || (p.status === 'error' && p.hasImage)));
   if (!candidates.length) { if (force) toast('Nichts wartet auf Recherche.'); return; }
@@ -354,7 +365,8 @@ async function maybeRunCheck(force = false) {
     const batch = candidates.slice(0, MAX_ITEMS_PER_CALL);
     const items = [];
     for (const p of batch) {
-      if (p.status === 'error') items.push({ ean: p.ean, image: await store.getImage(p.ean) });
+      const image = p.status === 'error' || (ARTIFACT && p.hasImage) ? await store.getImage(p.ean) : null;
+      if (image) items.push({ ean: p.ean, image });
       else items.push({ ean: p.ean, ocrText: p.ocrText || '' });
     }
     const known = Object.fromEntries(Object.entries(S.products).filter(([, p]) => p.status === 'verified' || p.status === 'edited'));
@@ -399,7 +411,7 @@ async function maybeRunCheck(force = false) {
     S.checking = false;
     renderAll();
   }
-  if (ok && shouldRunCheck(S.products, setting('batchSize', 10)).run) setTimeout(() => maybeRunCheck(), 500);
+  if (ok && shouldRunCheck(S.products, setting('batchSize', DEFAULT_BATCH)).run) setTimeout(() => maybeRunCheck(), 500);
 }
 
 async function addDupes(list) {
@@ -520,6 +532,15 @@ async function markSaved() {
 async function saveExcel({ quiet = false } = {}) {
   try {
     const bytes = await excelBytes();
+    if (ARTIFACT) {
+      const dl = await window.claude?.use?.('downloads');
+      if (!dl) throw new Error('Speichern ist in dieser Ansicht nicht möglich.');
+      try { await dl.save({ filename: `lager-${today()}.xlsx`, data: new Blob([bytes], { type: XLSX_TYPE }) }); }
+      catch (e) { if (e?.code === 'declined') return; throw new Error(e?.message || e?.code); }
+      await markSaved();
+      toast('Excel-Datei gespeichert');
+      return;
+    }
     if (S.fileHandle && S.fileOk) {
       const w = await S.fileHandle.createWritable();
       await w.write(new Blob([bytes], { type: XLSX_TYPE }));
@@ -730,7 +751,7 @@ function renderNeeds() {
         · <button class="small ghost" data-act="need-assign" data-line="${esc(r.id)}">${r.product ? 'Ändern' : 'Zuordnen'}</button>
         <button class="small ghost danger" data-act="need-del" data-line="${esc(r.id)}" aria-label="Position löschen">✕</button></span>
     </div>`).join('') : '<div class="empty">Positionen eingeben, z.B. „20 Steckdosen“, „8 Rahmen 2-fach Busch-Jaeger“, „12 Rahmen 1-fach“.</div>';
-  const hasKey = !!setting('apiKey', '');
+  const hasKey = aiOn();
   const unassigned = (n.lines || []).filter((l) => !l.code).length;
   $('needActions').innerHTML = `
     ${hasKey && unassigned ? `<button data-act="need-claude">Mit Claude zuordnen (${unassigned})</button>` : ''}
@@ -746,15 +767,19 @@ function renderNeeds() {
 
 function renderReview() {
   const st = checkStats();
-  const key = setting('apiKey', '');
+  const key = aiOn();
   const last = setting('lastCheck', null);
-  const batch = setting('batchSize', 10);
+  const batch = setting('batchSize', DEFAULT_BATCH);
   $('checkPanel').innerHTML = `
     <div class="top"><h2>Recherche durch Claude</h2>${S.checking ? '<span class="pill warn">Recherchiert…</span>' : ''}</div>
-    <div>${st.reading ? `${st.reading} Etikett(en) werden gelesen · ` : ''}<b>${st.waiting}</b> warten${st.failed ? ` · <b>${st.failed}</b> unlesbar` : ''}. Claude Haiku recherchiert neue Produkte im Internet, sobald ${batch === 1 ? 'ein Produkt' : batch + ' Produkte'} warten, oder sofort, wenn ein Etikett unlesbar ist.</div>
-    ${key ? '' : '<div class="msg info">In den Einstellungen deinen Anthropic-API-Schlüssel eintragen, dann recherchiert Claude Haiku neue Produkte automatisch. Ohne Schlüssel trägst du die Angaben selbst ein.</div>'}
+    <div>${st.reading ? `${st.reading} Etikett(en) werden gelesen · ` : ''}<b>${st.waiting}</b> warten${st.failed ? ` · <b>${st.failed}</b> unlesbar` : ''}. ${ARTIFACT
+      ? `Claude Haiku erkennt neue Produkte am Etikett-Foto, sobald ${batch === 1 ? 'ein Produkt wartet' : batch + ' Produkte warten'}. Läuft über dein Claude-Abo.`
+      : `Claude Haiku recherchiert neue Produkte im Internet, sobald ${batch === 1 ? 'ein Produkt' : batch + ' Produkte'} warten, oder sofort, wenn ein Etikett unlesbar ist.`}</div>
+    ${key ? '' : ARTIFACT
+      ? '<div class="msg info">Claude ist gerade nicht verfügbar. Beim ersten Mal fragt claude.ai, ob die App Claude nutzen darf – bitte erlauben. Ohne Claude trägst du die Angaben selbst ein.</div>'
+      : '<div class="msg info">In den Einstellungen deinen Anthropic-API-Schlüssel eintragen, dann recherchiert Claude Haiku neue Produkte automatisch. Ohne Schlüssel trägst du die Angaben selbst ein.</div>'}
     ${last ? `<div class="muted">Letzte Recherche ${new Date(last.t).toLocaleString('de-DE')}: ${last.error ? `<span class="bad-text">${esc(last.error)}</span>` : `${plural(last.n, 'Produkt', 'Produkte')}${last.searches ? `, ${last.searches} Websuchen` : ''}`}</div>` : ''}
-    <div class="row"><button data-act="check-now" ${!key || S.checking || !(st.waiting + st.failed) ? 'disabled' : ''}>Jetzt recherchieren</button>${key ? '' : '<button data-act="settings">Einstellungen</button>'}</div>`;
+    <div class="row"><button data-act="check-now" ${!key || S.checking || !(st.waiting + st.failed) ? 'disabled' : ''}>Jetzt recherchieren</button>${key || ARTIFACT ? '' : '<button data-act="settings">Einstellungen</button>'}</div>`;
   const dupes = setting('dupes', []).filter((d) => S.products[d.a] && S.products[d.b] && !S.products[d.a].aliasOf && !S.products[d.b].aliasOf);
   $('dupes').innerHTML = dupes.length ? '<div class="label">Vielleicht dasselbe Produkt</div>' + dupes.map((d) => {
     const A = S.products[d.a], B = S.products[d.b];
@@ -844,10 +869,10 @@ async function productSheet(code) {
       <div class="row"><input id="pf-maker" class="grow" placeholder="Hersteller" aria-label="Hersteller" value="${v('maker')}"><input id="pf-series" class="grow" placeholder="Serie" aria-label="Serie" value="${v('series')}"></div>
       <div class="row"><input id="pf-model" class="grow" placeholder="Artikelnr." aria-label="Artikelnummer" value="${v('model')}"><input id="pf-color" class="grow" placeholder="Farbe" aria-label="Farbe" value="${v('color')}"></div>
       <input id="pf-desc" placeholder="Beschreibung" aria-label="Beschreibung" value="${v('description')}">
-      <div class="row"><button class="primary grow" data-act="save">Speichern</button>${setting('apiKey', '') ? '<button class="grow" data-act="research">Neu recherchieren</button>' : ''}</div>
+      <div class="row"><button class="primary grow" data-act="save">Speichern</button>${aiOn() ? '<button class="grow" data-act="research">Neu recherchieren</button>' : ''}</div>
       ${p.source ? `<span class="muted">Quelle: <a href="${esc(p.source)}" target="_blank" rel="noopener">${esc(p.source.slice(0, 60))}</a></span>` : ''}
     </div>
-    ${qr ? `<div class="panel label-card"><img src="${qr}" alt="QR-Code ${esc(code)}" width="160" height="160"><div><b>Etikett für Produkte ohne Barcode</b><br><span class="muted">Ausdrucken und aufkleben – dann scannt die Kamera diesen Code wie einen Barcode.</span><br><button class="small" data-act="print-label">Etikett drucken</button></div></div>` : ''}
+    ${qr ? `<div class="panel label-card"><img src="${qr}" alt="QR-Code ${esc(code)}" width="160" height="160"><div><b>Etikett für Produkte ohne Barcode</b><br><span class="muted">Ausdrucken und aufkleben – dann scannt die Kamera diesen Code wie einen Barcode.</span><br><button class="small" data-act="print-label">${ARTIFACT ? 'Etikett als Bild speichern' : 'Etikett drucken'}</button></div></div>` : ''}
     ${imgUrl ? `<img class="thumb" src="${imgUrl}" alt="Foto">` : ''}
     ${p.ocrText ? `<details><summary class="muted">Vom Etikett gelesener Text</summary><pre>${esc(p.ocrText)}</pre></details>` : ''}
     <div class="panel">
@@ -903,7 +928,29 @@ async function productSheet(code) {
   });
 }
 
+async function saveLabelPng(p, qr) {
+  const img = new Image();
+  img.src = qr;
+  await img.decode();
+  const c = document.createElement('canvas');
+  c.width = 720; c.height = 260;
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+  g.drawImage(img, 20, 20, 220, 220);
+  g.fillStyle = '#000'; g.font = 'bold 28px Arial';
+  const words = String(p.name || '').split(' ');
+  let line = '', y = 60;
+  for (const w of words) { if (g.measureText(line + w).width > 440) { g.fillText(line, 260, y); y += 34; line = ''; } line += w + ' '; }
+  g.fillText(line, 260, y);
+  g.font = '24px Arial'; g.fillText([p.maker, p.model].filter(Boolean).join(' '), 260, y + 40);
+  g.font = '24px monospace'; g.fillText(p.ean, 260, 225);
+  const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
+  const dl = await window.claude?.use?.('downloads');
+  try { await dl?.save({ filename: `etikett-${p.ean}.png`, data: blob }); } catch (e) { if (e?.code !== 'declined') toast('Etikett speichern fehlgeschlagen.'); }
+}
+
 function printLabel(p, qr) {
+  if (ARTIFACT) { saveLabelPng(p, qr); return; }
   const w = window.open('', '_blank', 'width=420,height=360');
   if (!w) { toast('Pop-up blockiert. Bitte Pop-ups für diese Seite erlauben.'); return; }
   w.document.write(`<!doctype html><title>Etikett ${esc(p.ean)}</title><style>body{font:14px Arial,sans-serif;margin:12px}.l{display:flex;gap:10px;align-items:center;border:1px dashed #999;padding:8px;width:300px}b{display:block;font-size:15px}</style>
@@ -958,8 +1005,8 @@ function assignSheet(needId, lid) {
 }
 
 function excelSheet() {
-  const canLink = typeof window.showSaveFilePicker === 'function';
-  const canShare = !!navigator.canShare;
+  const canLink = !ARTIFACT && typeof window.showSaveFilePicker === 'function';
+  const canShare = !ARTIFACT && !!navigator.canShare;
   openSheet(`
     <div class="top"><h2>Excel</h2><button class="small" data-act="close">Schließen</button></div>
     <div class="msg info" id="excelState"></div>
@@ -968,7 +1015,7 @@ function excelSheet() {
     <button ${canLink ? '' : 'class="primary"'} data-act="excel-save">${S.fileHandle && S.fileOk ? 'Jetzt speichern' : 'Excel-Datei speichern'}</button>
     ${canShare ? '<button data-act="excel-share">Teilen (OneDrive, Drive, Mail…)</button>' : ''}
     <label class="btn">Excel-Datei laden (ersetzt die Daten)<input type="file" id="excel-import" accept=".xlsx,${XLSX_TYPE}"></label>
-    <span class="muted">${canLink ? 'Am PC (Chrome/Edge) wird die verknüpfte Datei nach jeder Änderung automatisch aktualisiert.' : 'Am Handy: „Teilen“ speichert die Datei z.B. in OneDrive oder Google Drive. Am PC mit Chrome oder Edge kann die App eine Datei automatisch aktuell halten.'}</span>
+    <span class="muted">${ARTIFACT ? 'Die Daten sind in claude.ai gespeichert und auf Handy und PC gleich. Die Excel-Datei ist ein Abzug davon – jederzeit neu speichern.' : canLink ? 'Am PC (Chrome/Edge) wird die verknüpfte Datei nach jeder Änderung automatisch aktualisiert.' : 'Am Handy: „Teilen“ speichert die Datei z.B. in OneDrive oder Google Drive. Am PC mit Chrome oder Edge kann die App eine Datei automatisch aktuell halten.'}</span>
   `, async (act) => {
     if (act === 'close') closeSheet();
     if (act === 'excel-link') await linkExcelFile();
@@ -985,11 +1032,12 @@ function settingsSheet() {
   openSheet(`
     <div class="top"><h2>Einstellungen</h2><button class="small" data-act="close">Schließen</button></div>
     <div class="panel">
+      ${ARTIFACT ? `<div class="label">Claude</div><span class="muted">Claude Haiku läuft über dein Claude-Abo, ohne API-Schlüssel. Status: ${S.ai?.text ? 'verfügbar' : 'nicht verfügbar'}${S.ai?.text && !S.ai.images ? ' (ohne Fotos)' : ''}.</span>` : `
       <label class="label" for="set-key">Anthropic-API-Schlüssel (für Claude Haiku)</label>
       <input id="set-key" type="password" autocomplete="off" placeholder="sk-ant-…" value="${esc(key)}">
-      <span class="muted">Bleibt nur auf diesem Gerät und geht nur an Anthropic. Anlegen unter console.anthropic.com → API Keys. Recherche von 10 Produkten kostet etwa 10–20 Cent (Websuche), Erkennen per Foto unter 1 Cent.</span>
+      <span class="muted">Bleibt nur auf diesem Gerät und geht nur an Anthropic. Anlegen unter console.anthropic.com → API Keys. Recherche von 10 Produkten kostet etwa 10–20 Cent (Websuche), Erkennen per Foto unter 1 Cent.</span>`}
       <label class="label" for="set-batch">Neue Produkte recherchieren</label>
-      <select id="set-batch">${[[1, 'sofort, einzeln'], [5, 'in Paketen von 5'], [10, 'in Paketen von 10'], [20, 'in Paketen von 20']].map(([n, t]) => `<option value="${n}" ${setting('batchSize', 10) === n ? 'selected' : ''}>${t}</option>`).join('')}</select>
+      <select id="set-batch">${[[1, 'sofort, einzeln'], [5, 'in Paketen von 5'], [10, 'in Paketen von 10'], [20, 'in Paketen von 20']].map(([n, t]) => `<option value="${n}" ${setting('batchSize', DEFAULT_BATCH) === n ? 'selected' : ''}>${t}</option>`).join('')}</select>
       <button class="primary" data-act="save-settings">Speichern</button>
     </div>
     <button data-act="open-excel">Excel speichern / laden</button>
@@ -997,10 +1045,10 @@ function settingsSheet() {
     if (act === 'close') closeSheet();
     if (act === 'open-excel') excelSheet();
     if (act === 'save-settings') {
-      const key = $('set-key').value.trim();
+      const key = ARTIFACT ? '' : $('set-key').value.trim();
       const batch = Number($('set-batch').value);
       closeSheet(); // before awaiting, so a sheet opened meanwhile stays open
-      await setSetting('apiKey', key);
+      if (!ARTIFACT) await setSetting('apiKey', key);
       await setSetting('batchSize', batch);
       S.checkRetryAt = 0;
       renderAll(); toast('Gespeichert');
@@ -1149,6 +1197,21 @@ function bind() {
 
 async function start() {
   bind();
+  if (ARTIFACT) {
+    document.querySelector('.camera').hidden = true; // the live camera is not available inside claude.ai
+    $('photoBtn').classList.add('primary', 'big-btn');
+    $('photoBtn').childNodes[2].textContent = ' Barcode fotografieren ';
+  }
+  try { await storeReady; } catch (e) { scanMsg(esc(e.message), 'err'); return; }
+  if (ARTIFACT) S.ai = await (await lazyAi()).capabilities().catch(() => null);
+  // Another device changed something: take the new state.
+  store.onChange?.(async () => {
+    const fresh = await store.loadAll();
+    S.products = fresh.products; S.jobs = fresh.jobs; S.needs = fresh.needs;
+    S.meta = { ...fresh.meta, apiKey: S.meta.apiKey };
+    await refreshLogs();
+    renderAll();
+  });
   const all = await store.loadAll();
   S.products = all.products; S.jobs = all.jobs; S.needs = all.needs; S.meta = all.meta;
   const sess = setting('session', null);
