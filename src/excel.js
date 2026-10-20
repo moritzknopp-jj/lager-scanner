@@ -112,8 +112,9 @@ export async function buildWorkbook({ products, log, jobs, needs = [] }, now = D
   // ---- Bestand ----
   const stockCols = ['Code', 'Art', 'Kategorie', 'Hersteller', 'Serie', 'Produkt', 'Variante', 'Farbe', 'Artikelnr.', 'Bestellnr.', 'EAN/GTIN', 'Alle Nummern', 'Bestand', 'Einheit', 'Einzelpreis (€)', 'Wert (€)', 'Status', 'Gleiches Produkt wie', 'Weitere Codes', 'Hinweis', 'Beschreibung', 'Quelle', 'Etikett-Text', 'Angelegt', 'Geändert'];
   // Every number we know, for pricing the stock later (EAN, article and order numbers, codes read from labels).
-  const allIds = (p) => [...new Set([p.ean, p.model, p.orderNo, ...(p.aliases || []), ...String(p.ids || '').split(/[,;\n]+/)].map((x) => String(x || '').trim()).filter(Boolean))].join(', ');
-  const eanOf = (p) => [p.ean, ...(p.aliases || [])].filter((c) => /^\d{8,14}$/.test(c)).join(', ');
+  const allIds = (p) => [...new Set([p.ean, p.gtin, p.model, p.orderNo, ...(p.aliases || []), ...String(p.ids || '').split(/[,;\n]+/)].map((x) => String(x || '').trim()).filter(Boolean))].join(', ');
+  // gtin: the real EAN found by research for a product kept under its own code.
+  const eanOf = (p) => [...new Set([p.ean, p.gtin, ...(p.aliases || [])])].filter((c) => /^\d{8,14}$/.test(c || '')).join(', ');
   const sorted = products.slice().sort((a, b) => !!a.aliasOf - !!b.aliasOf
     || cmpText(a.category, b.category) || cmpText(a.maker, b.maker) || cmpText(a.series, b.series) || cmpText(a.name, b.name));
   const st = table(wb.addWorksheet('Bestand', { properties: { tabColor: { argb: 'FF1D7A4F' } } }), stockCols, sorted.map((p) => ({
@@ -265,11 +266,13 @@ export async function parseWorkbook(buf) {
   const wb = new ExcelJS.Workbook();
   try { await wb.xlsx.load(buf); } catch { throw new Error('Die Datei konnte nicht als Excel-Datei gelesen werden.'); }
   const products = sheetRows(wb, 'Bestand').filter((r) => str(r.Code)).map((r) => {
+    const known = new Set([str(r.Code), ...str(r['Weitere Codes']).split(',').map((s) => s.trim())]);
+    const gtin = str(r['EAN/GTIN']).split(',').map((s) => s.trim()).find((c) => c && !known.has(c)) || '';
     const status = r.Status === 'Zusammengeführt' ? 'verified' : STATUS_BACK[r.Status] || 'edited';
     return {
       ean: str(r.Code), name: str(r.Produkt), maker: str(r.Hersteller), series: str(r.Serie), category: str(r.Kategorie),
       variant: str(r.Variante), color: str(r.Farbe), model: str(r['Artikelnr.']), description: str(r.Beschreibung), source: str(r.Quelle),
-      orderNo: str(r['Bestellnr.']), ids: str(r['Alle Nummern']), unit: str(r.Einheit) === 'm' ? 'm' : 'Stück',
+      orderNo: str(r['Bestellnr.']), ids: str(r['Alle Nummern']), gtin, unit: str(r.Einheit) === 'm' ? 'm' : 'Stück',
       price: r['Einzelpreis (€)'] === '' || r['Einzelpreis (€)'] == null || isNaN(Number(r['Einzelpreis (€)'])) ? null : Number(r['Einzelpreis (€)']),
       qty: Number(r.Bestand) || 0, status: status === 'new' ? 'manual' : status,
       aliasOf: str(r['Gleiches Produkt wie']) || null,

@@ -7,7 +7,7 @@ const data = {
   products: [
     { ean: '4037293393362', name: 'LED-Netzteil 24 V DC 18 W IP20', maker: 'EVN Lichttechnik', series: '', category: 'Netzteil/Treiber', variant: '18 W', model: 'SLK24018', orderNo: 'EVN-SLK24018', ids: 'SLK24018, 191120', price: 12.49, qty: 6, status: 'verified', aliases: ['0012345678905'], aliasOf: null, source: 'https://evn.example', created: T('2026-10-20T07:00:00Z'), updated: T('2026-10-20T08:00:00Z') },
     { ean: '0012345678905', name: 'LED-Netzteil', qty: 0, status: 'verified', aliases: [], aliasOf: '4037293393362', created: 1, updated: 2 },
-    { ean: 'T-FINDER-40-52', name: 'Relais 2 Wechsler 24 V', maker: 'Finder', category: 'Relais', model: '40.52', qty: 0, status: 'verified', aliases: [], aliasOf: null, created: 1, updated: 2 },
+    { ean: 'T-FINDER-40-52', gtin: '8012823046533', name: 'Relais 2 Wechsler 24 V', maker: 'Finder', category: 'Relais', model: '40.52', qty: 0, status: 'verified', aliases: [], aliasOf: null, created: 1, updated: 2 },
     { ean: '96385074', name: '', qty: 3, status: 'manual', aliases: [], aliasOf: null, created: 1, updated: 2 },
   ],
   log: [
@@ -114,6 +114,15 @@ describe('Excel workbook', () => {
     st.eachRow((r, n) => { if (n > 1 && r.getCell(head.indexOf('Code')).value === '4037293393362') r.getCell(head.indexOf('Bestand')).value = 40; });
     const back = await parseWorkbook(new Uint8Array(await wb.xlsx.writeBuffer()));
     expect(back.products.find((p) => p.ean === '4037293393362').qty).toBe(40);
+  });
+
+  it('shows the researched EAN of a product kept under its own code, and reads it back', async () => {
+    const bytes = await workbookBytes(await buildWorkbook(data));
+    const wb = await readBack(bytes);
+    expect(rows(wb.getWorksheet('Bestand')).find((r) => r.Code === 'T-FINDER-40-52')['EAN/GTIN']).toBe('8012823046533');
+    const back = await parseWorkbook(bytes);
+    expect(back.products.find((p) => p.ean === 'T-FINDER-40-52').gtin).toBe('8012823046533');
+    expect(back.products.find((p) => p.ean === '4037293393362').gtin).toBe('');
   });
 
   it('refuses a file that is not from the app', async () => {
