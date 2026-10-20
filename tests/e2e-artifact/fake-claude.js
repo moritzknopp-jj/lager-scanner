@@ -8,9 +8,11 @@ export function installFakeClaude({ dbKey }) {
   const persist = () => localStorage.setItem(KEY, JSON.stringify([...store]));
   const subs = new Set();
 
+  // claude.ai hands out read-only snapshot data (Safari: "Attempted to assign to readonly property").
+  const deepFreeze = (o) => { if (o && typeof o === 'object') { Object.values(o).forEach(deepFreeze); Object.freeze(o); } return o; };
   const snapDoc = (path) => {
     const d = store.get(path);
-    return { id: path.split('/').pop(), exists: !!d, data: () => (d ? clone(d) : undefined), metadata: { fromCache: false, hasPendingWrites: false } };
+    return { id: path.split('/').pop(), exists: !!d, data: () => (d ? deepFreeze(clone(d)) : undefined), metadata: Object.freeze({ fromCache: false, hasPendingWrites: false }) };
   };
   const querySnap = (q) => {
     const depth = q.coll.split('/').length + 1;

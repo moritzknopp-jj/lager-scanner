@@ -187,3 +187,17 @@ test('Daten liegen in claude.ai und sind nach Neuladen da', async ({ page, conte
   await page2.click('.tabs [data-view=log]');
   await expect(page2.locator('#logList .item')).toHaveCount(1);
 });
+
+test('Korb mit Produkt, das nie gespeichert wurde (alter Fehler): wird repariert und lässt sich einbuchen', async ({ page }) => {
+  // The state left behind by the read-only bug: 3 in the basket, product missing.
+  const dbKey = 'orphan' + Math.random().toString(36).slice(2);
+  await page.addInitScript(([k, code]) => {
+    if (!localStorage.getItem('fakedb:' + k)) localStorage.setItem('fakedb:' + k, JSON.stringify([['meta/session', { v: { mode: 'in', jobId: '', basket: [{ ean: code, qty: 3 }] } }]]));
+  }, [dbKey, EVN]);
+  await openArtifact(page, { dbKey });
+  await expect(page.locator(`#q-${EVN}`)).toHaveValue('3');
+  await expect.poll(async () => (await product(page, EVN))?.status).toBe('ocr');
+  await book(page);
+  await expect(page.locator('#scanMsg')).toContainText('Eingebucht: 3 Stück');
+  expect((await product(page, EVN)).qty).toBe(3);
+});

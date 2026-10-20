@@ -87,7 +87,8 @@ export function openStore() {
     db = await window.claude?.use?.('db');
     if (!db) throw new Error('Bitte bei claude.ai anmelden – sonst kann nichts gespeichert werden.');
     assets = await window.claude.use('assets').catch(() => null);
-    const docsToMap = (name, snap) => overlay(name, Object.fromEntries(snap.docs.map((d) => [d.id, d.data()])));
+    // Snapshot data from claude.ai is read-only: keep our own copies so the cache can be changed.
+    const docsToMap = (name, snap) => overlay(name, Object.fromEntries(snap.docs.map((d) => [d.id, clone(d.data())])));
     await Promise.all([
       subscribe(db.collection('catalog'), (s) => { C.shards = docsToMap('catalog', s); rebuildProducts(); }),
       subscribe(db.collection('jobs'), (s) => { C.jobs = docsToMap('jobs', s); }),
@@ -195,7 +196,7 @@ export async function logForProduct(ean, limit = 50) {
 export async function allLog() {
   await readyP;
   const snap = await db.collection('log').orderBy('day', 'desc').limit(1000).get();
-  return snap.docs.flatMap((d) => d.data().entries || []).sort((a, b) => a.t - b.t);
+  return snap.docs.flatMap((d) => clone(d.data().entries || [])).sort((a, b) => a.t - b.t);
 }
 
 export async function bookLines({ kind, lines, jobId = null, basketId = rid(), note = '' }) {

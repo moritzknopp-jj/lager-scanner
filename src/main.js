@@ -1222,6 +1222,9 @@ async function start() {
   await refreshLogs();
   renderAll();
   for (const p of Object.values(S.products)) if (p.status === 'new') readNewLabel(p.ean, p.hasImage ? store.getImage(p.ean) : null);
+  // Basket lines whose product never got saved (e.g. after a failed save): create them now so they can be booked.
+  for (const l of S.basket) if (!S.products[l.ean]) await createProduct(l.ean, null);
+  if (S.basket.length) renderAll();
   maybeRunCheck();
   if (!window.isSecureContext) scanMsg('Die Kamera braucht eine sichere (https) Adresse.', 'err');
 }
