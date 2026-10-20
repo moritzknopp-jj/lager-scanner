@@ -27,6 +27,15 @@ export function compactCatalog(products) {
 }
 const CATALOG_KEYS = 'Catalog keys: c=code (EAN, or own tag code starting with T-), n=name, m=maker, s=series/line, k=category, v=variant, a=article/model number, q=in stock.';
 
+const CORR_RULES = `You are the correction agent for the stock list of a German electrical installation company. Check the given products and correct them.
+For each product you get its current data, the text and numbers read from its label, and for some a photo.
+- If the photo or the numbers show what the product is, fill in the exact product (maker, series, article number, order number, all IDs), even when the current entry says "unbekannt" or "kein Produkt gefunden". Read every ID on the photo.
+- ean_on_photo: the EAN/GTIN digits if a barcode or EAN number is visible in the photo, else "". Products whose code is a web address, an own code (T-…) or not a valid EAN should get the real EAN this way when it is visible.
+- Keep fields that are already right; only change what is wrong or missing. Never invent.
+- merges: pairs of codes that are the same article (same maker and article number, or clearly the same product photographed twice). "into" is the entry to keep (prefer a real EAN, then the better-filled entry).
+- reason: one short German sentence per change.`;
+const FIX_KEYS = 'code, name, maker, series, category, variant, color, model, order_number, all_ids, unit, ean_on_photo, confidence, reason';
+
 const MAKER_HINT = `Almost everything in this stock is from Busch-Jaeger (ABB). Look up Busch-Jaeger first (busch-jaeger.de), then ABB (new.abb.com): their article numbers are the cleanest IDs. Busch-Jaeger article numbers look like "1721-914", "1722-914" or "2006/1 UC-914"; ABB order codes look like "2CKA001725A1558"; Busch-Jaeger GTINs start with 4011395. In article numbers, 1721 = frame 1-fach, 1722 = 2-fach, 1723 = 3-fach, and the suffix is the design and colour (e.g. -914 = Busch-balance SI alpinweiß, -184K = future linear studioweiß).
 Frames (Rahmen): always decide the design line. This company mainly uses Busch-balance SI and future linear. Busch-balance SI: glossy, gently domed surface, softly rounded outer edges and corners. future linear: flat surface with straight, crisp edges and nearly square corners. Others: Reflex SI (strongly rounded, thick), Busch-axcent (flat frame with wide border), solo, carat (glass/metal), Busch-dynasty. If you cannot tell, say so in note.
 Other makers occur: lights and drivers (e.g. EVN, Easylux) usually carry the brand and article number on the label; cables are written like "NYM-J 3x1,5" or "J-Y(St)Y 2x2x0,8" and counted in metres.`;
@@ -221,6 +230,31 @@ For each line, return the catalog code of the product that fits it (same kind, s
   } catch (err) { throw friendlyError(err); }
   checkStop(res);
   return lastJson(res.content).matches || [];
+}
+
+// ---------- correction agent ----------
+export async function correctBatch({ apiKey, items, catalog }) {
+  const c = client(apiKey);
+  const photos = items.filter((i) => i.image).slice(0, 10);
+  const withPhoto = new Set(photos.map((p) => p.code));
+  const content = [{ type: 'text', text: `${CATALOG_KEYS}\nWhole catalog (for merges): ${JSON.stringify(catalog)}\n\nProducts to check: ${JSON.stringify(items.map((i) => ({ code: i.code, photo: withPhoto.has(i.code), ...i.current })))}` }];
+  for (const p of photos) { content.push({ type: 'text', text: `Photo for ${p.code}:` }); content.push(await imageBlock(p.image)); }
+  content.push({ type: 'text', text: `Final message: only a JSON object {"fixes":[{${FIX_KEYS.split(', ').map((k) => '"' + k + '"').join(',')}}],"merges":[{"from","into","reason"}]}, one entry in "fixes" per checked product.` });
+  const base = { model: MODEL, max_tokens: 16000, system: `${CORR_RULES}\n${MAKER_HINT}\n${FIELDS}\nUse web search (Busch-Jaeger first, then ABB, then the maker) to confirm article numbers and EANs.`, output_config: { effort: 'low' } };
+  const tools = [{ type: 'web_search_20250305', name: 'web_search', max_uses: Math.min(10, items.length * 2) }];
+  const messages = [{ role: 'user', content }];
+  let res;
+  try {
+    res = await c.messages.create({ ...base, tools, messages });
+    for (let i = 0; i < 4 && res.stop_reason === 'pause_turn'; i++) res = await c.messages.create({ ...base, tools, messages: [messages[0], { role: 'assistant', content: res.content }] });
+  } catch (err) {
+    if (err instanceof Anthropic.BadRequestError && /tool|web_search/i.test(err.message || '')) {
+      try { res = await c.messages.create({ ...base, messages }); } catch (e2) { throw friendlyError(e2); }
+    } else throw friendlyError(err);
+  }
+  checkStop(res);
+  const r = lastJson(res.content);
+  return { fixes: Array.isArray(r?.fixes) ? r.fixes : [], merges: Array.isArray(r?.merges) ? r.merges : [] };
 }
 
 export function friendlyError(err) {

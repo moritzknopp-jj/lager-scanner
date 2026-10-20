@@ -7,6 +7,11 @@ export function installFakeClaude({ dbKey }) {
   const store = new Map(JSON.parse(localStorage.getItem(KEY) || '[]'));
   const persist = () => localStorage.setItem(KEY, JSON.stringify([...store]));
   const subs = new Set();
+  // update(): nested objects merge recursively, everything else (arrays too) replaces.
+  const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
+  const merge = (t, p) => { const o = { ...t }; for (const [k, v] of Object.entries(p)) o[k] = isObj(v) && isObj(o[k]) ? merge(o[k], v) : clone(v); return o; };
+  // Like claude.ai's periodic refresh: deliver a snapshot taken BEFORE the latest write, late.
+  window.__fakeStale = false;
 
   // claude.ai hands out read-only snapshot data (Safari: "Attempted to assign to readonly property").
   const deepFreeze = (o) => { if (o && typeof o === 'object') { Object.values(o).forEach(deepFreeze); Object.freeze(o); } return o; };
@@ -24,14 +29,19 @@ export function installFakeClaude({ dbKey }) {
     if (q.limit) docs = docs.slice(0, q.limit);
     return { docs, size: docs.length, empty: !docs.length, docChanges: () => [], metadata: { fromCache: false, hasPendingWrites: false } };
   };
-  const fire = () => { for (const s of subs) setTimeout(() => s.cb(s.q ? querySnap(s.q) : snapDoc(s.path)), 0); };
+  const fire = () => {
+    for (const s of subs) {
+      const snap = s.q ? querySnap(s.q) : snapDoc(s.path);
+      setTimeout(() => s.cb(snap), window.__fakeStale ? 400 : 0); // stale mode: the snapshot arrives after newer writes
+    }
+  };
   const check = (d) => { if (!d || typeof d !== 'object' || Array.isArray(d)) throw { code: 'invalid_argument', message: 'body must be an object' }; if (JSON.stringify(d).length > 262144) throw { code: 'invalid_argument', message: 'document over 256 KiB' }; };
 
   const doc = (path) => ({
     id: path.split('/').pop(), path,
     get: async () => snapDoc(path),
     set: async (d) => { check(d); store.set(path, clone(d)); persist(); fire(); },
-    update: async (d) => { if (!store.has(path)) throw { code: 'invalid_argument' }; store.set(path, { ...store.get(path), ...clone(d) }); persist(); fire(); },
+    update: async (d) => { if (!store.has(path)) throw { code: 'invalid_argument', message: 'no such document' }; check(d); store.set(path, merge(store.get(path), d)); persist(); fire(); },
     delete: async () => { store.delete(path); persist(); fire(); },
     onSnapshot: (cb) => { const s = { path, cb }; subs.add(s); setTimeout(() => cb(snapDoc(path)), 0); return () => subs.delete(s); },
     collection: (c) => query(path + '/' + c),

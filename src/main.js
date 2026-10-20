@@ -1,7 +1,7 @@
 import * as store from './db.js';
 import {
   normalizeCode, resolveMaster, RepeatGuard, basketAdd, basketSet, basketTotal, shortages, guessFromOcr, ocrUsable, shouldRunCheck,
-  today, cmpText, STATUS_LABEL, CATEGORIES, makeTagCode, isTag, parseNeedText, suggestProducts, computeNeed, orderList, takenForNeed, groupByCategory,
+  today, cmpText, STATUS_LABEL, CATEGORIES, makeTagCode, isTag, parseNeedText, suggestProducts, computeNeed, orderList, takenForNeed, groupByCategory, findIssues, pickKeeper, codeProblem,
 } from './logic.js';
 import { startCamera, captureFrame, decodePhoto, shrinkPhoto } from './scanner.js';
 
@@ -193,6 +193,7 @@ async function scanProduct(file) {
     const raw = await decodePhoto(file);
     const n = raw ? normalizeCode(raw) : null;
     scanMsg('');
+    if (n?.url) { identifySheet(small, { text: '', hint: 'QR-Code auf der Verpackung: ' + n.url }); return; }
     if (n?.code) {
       const isNew = !S.products[n.code];
       if (isNew) await createProduct(n.code, small); // Claude researches it from this photo
@@ -254,7 +255,7 @@ function qtySheet(code, { isNew = false, note = '' } = {}) {
 }
 
 // ---------- products without barcode ----------
-function identifySheet(blob, { text = '' } = {}) {
+function identifySheet(blob, { text = '', hint = '' } = {}) {
   const url = blob ? URL.createObjectURL(blob) : '';
   const ai = blob ? aiImages() : aiOn();
   openSheet(`
@@ -262,7 +263,7 @@ function identifySheet(blob, { text = '' } = {}) {
     ${url ? `<img class="thumb" src="${url}" alt="Foto des Produkts">` : `<div><b>„${esc(text)}“</b></div>`}
     <div id="id-result">${ai ? '<div class="msg info">Claude erkennt das Produkt…</div>' : ''}</div>
     <div class="row" id="id-actions" ${ai ? 'hidden' : ''}>
-      <input id="id-hint" class="grow" placeholder="${blob ? 'Hinweis, z.B. „Busch-Jaeger Rahmen 2-fach“' : 'Genauer beschreiben'}" value="${esc(text)}">
+      <input id="id-hint" class="grow" placeholder="${blob ? 'Hinweis, z.B. „Busch-Jaeger Rahmen 2-fach“' : 'Genauer beschreiben'}" value="${esc(text || hint)}">
       ${ai ? '<button data-act="identify">Nochmal erkennen</button>' : ''}
     </div>
     <button class="ghost" data-act="manual-new" id="id-manual">${ai ? 'Selbst anlegen' : 'Produkt anlegen'}</button>
@@ -509,6 +510,172 @@ async function merge(fromCode, intoCode) {
     renderAll();
     toast('Zusammengeführt. Beide Codes buchen jetzt dasselbe Produkt.');
   } catch (e) { toast(e.message); }
+}
+
+// ---------- correction agent ----------
+// Finds what is wrong (duplicates, bad codes, unknown products, stock corrections), lets Claude look at
+// the photos and numbers again, and lists every change as a proposal to accept or reject.
+const FIELD_LABEL = { name: 'Name', maker: 'Hersteller', series: 'Serie', category: 'Kategorie', variant: 'Variante', color: 'Farbe', model: 'Artikelnr.', orderNo: 'Bestellnr.', ids: 'Nummern', unit: 'Einheit' };
+const pid = () => Math.random().toString(36).slice(2, 9);
+const plain = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9äöüß]+/g, '');
+
+async function runCorrection({ all = false } = {}) {
+  if (S.correcting) return;
+  S.correcting = true;
+  renderCorrection('Prüfe Bestand und Buchungen…');
+  try {
+    const log = await store.allLog();
+    const iss = findIssues(S.products, log);
+    const live = Object.values(S.products).filter((p) => !p.aliasOf);
+    const codes = all ? live.map((p) => p.ean) : Object.keys(iss.reasons).filter((c) => S.products[c] && !S.products[c].aliasOf);
+    const fixes = [], merges = [];
+    if (aiOn() && codes.length) {
+      const { correctBatch, compactCatalog } = await lazyAi();
+      const catalog = compactCatalog(S.products);
+      const step = ARTIFACT ? 5 : 8;
+      for (let i = 0; i < codes.length; i += step) {
+        const chunk = codes.slice(i, i + step);
+        renderCorrection(`Claude prüft ${Math.min(i + step, codes.length)} von ${codes.length} Produkten…`);
+        const items = [];
+        for (const c of chunk) {
+          const p = S.products[c];
+          items.push({
+            code: c, image: await store.getImage(c),
+            current: { name: p.name, maker: p.maker, series: p.series, category: p.category, variant: p.variant, color: p.color, model: p.model, order_number: p.orderNo || '', all_ids: p.ids || '', label_text: String(p.ocrText || '').slice(0, 600), note: p.aiNote || '', problems: (iss.reasons[c] || []).join('; ') },
+          });
+        }
+        try {
+          const r = await correctBatch({ apiKey: setting('apiKey', ''), items, catalog });
+          fixes.push(...r.fixes); merges.push(...r.merges);
+        } catch (e) { toast(e.message); if (/Limit|abgelehnt|anmelden/.test(e.message)) break; }
+      }
+    }
+    const props = buildProposals(iss, fixes, merges);
+    await setSetting('corrections', props);
+    await setSetting('lastCorrection', { t: Date.now(), checked: codes.length, ai: aiOn() });
+    toast(props.length ? `${props.length} Vorschläge zur Korrektur` : 'Nichts zu korrigieren gefunden');
+  } catch (e) { toast(e.message); }
+  finally { S.correcting = false; renderCorrection(); }
+}
+
+function buildProposals(iss, fixes, merges) {
+  const props = [];
+  const live = (c) => S.products[c] && !S.products[c].aliasOf;
+  for (const f of fixes) {
+    const p = S.products[f.code];
+    if (!p || !live(f.code)) continue;
+    const want = { name: f.name, maker: f.maker, series: f.series, category: f.category, variant: f.variant, color: f.color, model: f.model, orderNo: f.order_number, unit: f.unit === 'm' ? 'm' : '' };
+    const changes = {};
+    if (f.confidence !== 'low') for (const [k, v] of Object.entries(want)) if (v && plain(v) !== plain(p[k])) changes[k] = v;
+    const newIds = mergeIds(p.ids, f.all_ids);
+    if (f.confidence !== 'low' && newIds !== mergeIds(p.ids)) changes.ids = newIds;
+    if (Object.keys(changes).length) props.push({ id: pid(), type: 'fix', code: f.code, changes, reason: f.reason || '', confidence: f.confidence || '' });
+    const ean = normalizeCode(f.ean_on_photo || '').code;
+    if (ean && /^\d{8,14}$/.test(ean) && ean !== f.code && (codeProblem(f.code) || isTag(f.code))) props.push({ id: pid(), type: 'recode', code: f.code, ean, reason: 'EAN auf dem Foto: ' + ean });
+  }
+  const pairs = new Set();
+  const addMerge = (from, into, reason) => {
+    if (!live(from) || !live(into) || from === into) return;
+    const k = [from, into].sort().join('|');
+    if (pairs.has(k)) return;
+    pairs.add(k);
+    props.push({ id: pid(), type: 'merge', from, into, reason });
+  };
+  for (const m of merges) addMerge(String(m.from), String(m.into), m.reason || '');
+  for (const g of iss.dupGroups) {
+    const keep = pickKeeper(g, S.products);
+    for (const c of g) if (c !== keep) addMerge(c, keep, 'Gleicher Name bzw. gleiche Artikelnummer');
+  }
+  for (const c of Object.keys(iss.reasons)) {
+    const cp = live(c) && codeProblem(c);
+    if (cp && !props.some((x) => x.type === 'recode' && x.code === c) && !props.some((x) => x.type === 'merge' && x.from === c)) props.push({ id: pid(), type: 'note', code: c, reason: cp + '. Bitte den echten Barcode scannen oder das Produkt zusammenführen.' });
+  }
+  for (const e of iss.adjusts) props.push({ id: pid(), type: 'adjust', entryId: e.id, code: e.e, q: e.q, t: e.t, reason: e.note || '' });
+  return props;
+}
+
+async function recode(code, ean) {
+  const p = S.products[code];
+  if (!S.products[ean]) {
+    await store.putProduct({ ...p, ean, qty: 0, aliases: [], aliasOf: null, ids: mergeIds(ean, p.ids, isTag(code) || codeProblem(code) ? '' : code), status: 'verified', aiNote: '', created: Date.now(), updated: Date.now() });
+    const img = await store.getImage(code);
+    if (img) await store.putImage(ean, img);
+  }
+  await store.mergeProducts(code, ean);
+}
+
+async function applyProposal(pr) {
+  if (pr.type === 'fix') {
+    const p = S.products[pr.code];
+    if (!p) return;
+    const ch = { ...pr.changes };
+    if (ch.unit === '') delete ch.unit;
+    const np = { ...p, ...ch, status: 'verified', aiNote: pr.reason ? 'Korrektur: ' + pr.reason : '', updated: Date.now() };
+    S.products[pr.code] = np;
+    await store.putProduct(np);
+  } else if (pr.type === 'recode') {
+    if (S.products[pr.code] && !S.products[pr.code].aliasOf) await recode(pr.code, pr.ean);
+  } else if (pr.type === 'merge') {
+    const from = master(pr.from)?.ean, into = master(pr.into)?.ean;
+    if (from && into && from !== into) await store.mergeProducts(from, into);
+  } else if (pr.type === 'adjust') {
+    try { await store.undoEntry(pr.entryId); } catch (e) { if (!/Bereits/.test(e.message)) throw e; }
+  }
+}
+
+async function reloadState() {
+  const all = await store.loadAll();
+  S.products = all.products; S.jobs = all.jobs; S.needs = all.needs;
+  await refreshLogs();
+}
+
+async function resolveProposals(ids, accept) {
+  const list = setting('corrections', []);
+  const order = { fix: 0, recode: 1, merge: 2, adjust: 3, note: 4 };
+  const chosen = list.filter((x) => ids.includes(x.id)).sort((a, b) => order[a.type] - order[b.type]);
+  try {
+    if (accept) for (const pr of chosen) { await applyProposal(pr); await reloadState(); }
+  } catch (e) { toast(e.message); }
+  await setSetting('corrections', setting('corrections', []).filter((x) => !chosen.some((c) => c.id === x.id)));
+  if (accept && chosen.length) changed();
+  renderAll();
+  if (accept) toast(chosen.length === 1 ? 'Übernommen' : `${chosen.length} Korrekturen übernommen`);
+}
+
+function proposalHtml(pr) {
+  const p = S.products[pr.code] || S.products[pr.from];
+  const nm = (c) => esc(S.products[c]?.name || c);
+  let body = '';
+  if (pr.type === 'fix') body = `<b>${nm(pr.code)}</b><div class="changes">${Object.entries(pr.changes).map(([k, v]) => `<div><span class="muted">${FIELD_LABEL[k] || k}:</span> ${p?.[k] ? `<s>${esc(p[k])}</s> → ` : ''}${esc(v)}</div>`).join('')}</div>`;
+  if (pr.type === 'recode') body = `<b>${nm(pr.code)}</b><div>Code <span class="mono">${esc(pr.code)}</span> → EAN <span class="mono">${esc(pr.ean)}</span></div>`;
+  if (pr.type === 'merge') body = `<b>Zusammenführen</b><div>${nm(pr.from)} <span class="muted">(${S.products[pr.from]?.qty ?? 0} Stück)</span><br>→ in ${nm(pr.into)} <span class="muted">(${S.products[pr.into]?.qty ?? 0} Stück)</span></div><div class="muted">Danach ${(S.products[pr.from]?.qty || 0) + (S.products[pr.into]?.qty || 0)} Stück zusammen – bitte nachzählen, falls es doppelt gescannt wurde.</div>`;
+  if (pr.type === 'adjust') body = `<b>Bestandskorrektur ${pr.q > 0 ? '+' : '−'}${Math.abs(pr.q)}</b><div>${nm(pr.code)} · ${new Date(pr.t).toLocaleString('de-DE')}</div>`;
+  if (pr.type === 'note') body = `<b>${nm(pr.code)}</b><div class="mono">${esc(pr.code)}</div>`;
+  const label = { fix: 'Angaben korrigieren', recode: 'Echten Barcode übernehmen', merge: 'Doppelt', adjust: 'Korrektur prüfen', note: 'Hinweis' }[pr.type];
+  const ok = { fix: 'Übernehmen', recode: 'Übernehmen', merge: 'Zusammenführen', adjust: 'Stornieren', note: '' }[pr.type];
+  return `<div class="panel corr ${pr.type}">
+    <span class="label">${label}${pr.confidence ? ' · ' + esc(pr.confidence) : ''}</span>
+    ${body}
+    ${pr.reason ? `<div class="muted">${esc(pr.reason)}</div>` : ''}
+    <div class="row">${ok ? `<button class="small primary" data-act="corr-ok" data-id="${pr.id}">${ok}</button>` : ''}<button class="small ghost" data-act="corr-no" data-id="${pr.id}">${pr.type === 'note' ? 'Erledigt' : 'Verwerfen'}</button></div>
+  </div>`;
+}
+
+function renderCorrection(progress = '') {
+  const list = setting('corrections', []).filter((x) => (x.code ? S.products[x.code] : true));
+  const last = setting('lastCorrection', null);
+  const iss = findIssues(S.products, []);
+  const open = Object.keys(iss.reasons).length;
+  $('corrPanel').innerHTML = `
+    <div class="top"><h2>Korrektur-Agent</h2>${S.correcting ? '<span class="pill warn">Läuft…</span>' : ''}</div>
+    <span>${progress || `Findet doppelte Produkte, falsche Codes, nicht erkannte Produkte und Bestandskorrekturen. ${aiOn() ? 'Claude sieht sich dazu Fotos und alle Nummern noch einmal an.' : 'Ohne Claude nur die einfachen Prüfungen.'}`}</span>
+    ${!progress && open ? `<span class="muted">${plural(open, 'Produkt fällt', 'Produkte fallen')} gerade auf.</span>` : ''}
+    ${last && !progress ? `<span class="muted">Letzter Lauf ${new Date(last.t).toLocaleString('de-DE')}: ${plural(last.checked, 'Produkt', 'Produkte')} geprüft.</span>` : ''}
+    <div class="row wrap-gap"><button class="primary" data-act="corr-run" ${S.correcting ? 'disabled' : ''}>Korrekturlauf starten</button><button data-act="corr-run-all" ${S.correcting ? 'disabled' : ''}>Alle Produkte prüfen</button></div>`;
+  const main = list.filter((x) => x.type !== 'adjust');
+  const adj = list.filter((x) => x.type === 'adjust');
+  $('corrList').innerHTML = (main.length ? `<div class="top"><span class="label">${main.length} Vorschläge</span><button class="small" data-act="corr-all">Alle übernehmen</button></div>${main.map(proposalHtml).join('')}` : '')
+    + (adj.length ? `<div class="top"><span class="label">${plural(adj.length, 'Bestandskorrektur', 'Bestandskorrekturen')} zum Prüfen</span><button class="small" data-act="corr-adj-all">Alle stornieren</button></div>${adj.map(proposalHtml).join('')}` : '');
 }
 
 // ---------- needs lists ----------
@@ -860,7 +1027,7 @@ function renderReview() {
       <span class="t">${esc(p.name || 'Unbenanntes Produkt')} ${statusPill(p)}</span><span class="n">${p.qty || 0}</span>
       <span class="s"><span class="mono">${esc(p.ean)}</span>${p.aiNote ? ' · ' + esc(p.aiNote) : ''}</span></button>`).join('')
     : '<div class="empty">Alle Produkte sind geprüft.</div>';
-  const nAtt = Object.values(S.products).filter((p) => !p.aliasOf && ['error', 'manual'].includes(p.status)).length + dupes.length;
+  const nAtt = Object.values(S.products).filter((p) => !p.aliasOf && ['error', 'manual'].includes(p.status)).length + dupes.length + setting('corrections', []).length;
   $('reviewBadge').hidden = !nAtt; $('reviewBadge').textContent = nAtt;
   const chip = $('checkChip');
   chip.hidden = !(st.waiting || st.reading || S.checking);
@@ -897,7 +1064,7 @@ function renderExcelState() {
 }
 
 function renderAll() {
-  renderMode(); renderBasket(); renderRecent(); renderStock(); renderJobs(); renderNeeds(); renderReview(); renderLog(); renderExcelState();
+  renderMode(); renderBasket(); renderRecent(); renderStock(); renderJobs(); renderNeeds(); renderReview(); renderCorrection(); renderLog(); renderExcelState();
 }
 
 function showView(v) {
@@ -1231,6 +1398,10 @@ function bind() {
     else if (act === 'product') productSheet(el.dataset.ean);
     else if (act === 'job') jobSheet(el.dataset.id);
     else if (act === 'check-now') maybeRunCheck(true);
+    else if (act === 'corr-run' || act === 'corr-run-all') runCorrection({ all: act === 'corr-run-all' });
+    else if (act === 'corr-ok' || act === 'corr-no') await resolveProposals([el.dataset.id], act === 'corr-ok');
+    else if (act === 'corr-all') await resolveProposals(setting('corrections', []).filter((x) => !['adjust', 'note'].includes(x.type)).map((x) => x.id), true);
+    else if (act === 'corr-adj-all') await resolveProposals(setting('corrections', []).filter((x) => x.type === 'adjust').map((x) => x.id), true);
     else if (act === 'settings') settingsSheet();
     else if (act === 'excel-save') saveExcel();
     else if (act === 'regrant') regrantFile();

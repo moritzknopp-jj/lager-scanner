@@ -11,6 +11,8 @@ export function gtinValid(d) {
 export function normalizeCode(raw) {
   const code = String(raw ?? '').trim().replace(/\s+/g, '');
   if (!code) return { error: 'Kein Code.' };
+  // QR codes on packaging often hold a web address: that is not a product code.
+  if (/^(https?:\/\/|www\.)/i.test(code) || /^[a-z0-9-]+\.[a-z]{2,}\//i.test(code)) return { error: 'Das ist ein QR-Code mit Webadresse, kein Produktcode.', url: code };
   if (/^\d+$/.test(code) && [8, 12, 13, 14].includes(code.length)) {
     if (!gtinValid(code)) return { error: 'Prüfziffer stimmt nicht. Wahrscheinlich ist eine Ziffer falsch gelesen – bitte nochmal scannen oder tippen.' };
     return { code: code.length === 12 ? '0' + code : code };
@@ -274,4 +276,61 @@ export function groupByCategory(list) {
     g.qty += Math.max(0, p.qty || 0);
   }
   return [...groups.values()].sort((a, b) => (a.category === 'Ohne Kategorie') - (b.category === 'Ohne Kategorie') || a.category.localeCompare(b.category));
+}
+
+// ---------- correction round: checks that need no AI ----------
+const norm = (s) => String(s || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '');
+
+// Is this a code a product should keep? EANs with valid check digit and own T- codes are; web addresses,
+// odd-length digit strings or failed check digits are not.
+export function codeProblem(code) {
+  const c = String(code || '');
+  if (/^(https?:\/\/|www\.)/i.test(c) || /^[a-z0-9-]+\.[a-z]{2,}\//i.test(c)) return 'Code ist eine Webadresse (QR-Code), keine EAN';
+  if (/^\d+$/.test(c)) {
+    if (![8, 12, 13, 14].includes(c.length)) return `Code hat ${c.length} Ziffern – keine gültige EAN`;
+    if (!gtinValid(c)) return 'Prüfziffer der EAN stimmt nicht';
+  }
+  return '';
+}
+
+export function findIssues(products, log = []) {
+  const live = Object.values(products).filter((p) => !p.aliasOf);
+  const reasons = {};
+  const add = (code, why) => { (reasons[code] ||= []).push(why); };
+  for (const p of live) {
+    const cp = codeProblem(p.ean);
+    if (cp) add(p.ean, cp);
+    const text = [p.name, p.maker, p.aiNote].join(' ');
+    if (!p.name) add(p.ean, 'Kein Produktname');
+    else if (/unbekannt|kein produkt|nicht erkennbar|art unbekannt|vermutlich/i.test(text)) add(p.ean, 'Produkt nicht sicher erkannt');
+    if (['manual', 'error', 'ocr', 'new'].includes(p.status)) add(p.ean, 'Status: ' + p.status);
+    if (/busch/i.test(p.maker || '') && !p.model) add(p.ean, 'Busch-Jaeger ohne Artikelnummer');
+  }
+  // Duplicates: same maker + article number, same name, or an own code with a "-2" twin.
+  const groups = new Map();
+  const put = (key, code) => { if (!key) return; if (!groups.has(key)) groups.set(key, new Set()); groups.get(key).add(code); };
+  for (const p of live) {
+    if (p.model) put('m:' + norm(p.maker) + '|' + norm(p.model), p.ean);
+    if (p.name) put('n:' + norm(p.maker) + '|' + norm(p.name), p.ean);
+    if (/^T-/.test(p.ean)) put('t:' + p.ean.replace(/-\d+$/, ''), p.ean);
+  }
+  const seen = new Set();
+  const dupGroups = [];
+  for (const set of groups.values()) {
+    if (set.size < 2) continue;
+    const g = [...set].sort();
+    const k = g.join('|');
+    if (seen.has(k)) continue;
+    seen.add(k);
+    dupGroups.push(g);
+    for (const c of g) add(c, 'Vielleicht doppelt');
+  }
+  const adjusts = log.filter((e) => e.k === 'adjust' && !e.undone);
+  return { reasons, dupGroups, adjusts };
+}
+
+// Which entry of a duplicate group to keep: a real EAN first, then the best-filled entry, then the oldest.
+export function pickKeeper(codes, products) {
+  const score = (p) => (codeProblem(p.ean) ? 0 : /^\d+$/.test(p.ean) ? 4 : 2) + (p.model ? 2 : 0) + (p.orderNo ? 1 : 0) + (p.name ? 1 : 0);
+  return [...codes].sort((a, b) => score(products[b]) - score(products[a]) || (products[a].created || 0) - (products[b].created || 0))[0];
 }

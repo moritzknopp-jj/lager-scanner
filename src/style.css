@@ -180,3 +180,7 @@ textarea { font: 14px/1.4 var(--font-mono); }
 .qtybig button { min-height: 64px; font-size: 1.8rem; padding: 0; }
 .qtybig input { min-height: 64px; text-align: center; font-family: var(--font-head); font-size: 2rem; font-weight: 700; }
 .quick button { flex: 1 1 0; }
+.corr .changes { display: flex; flex-direction: column; gap: 2px; font-size: .92rem; }
+.corr s { color: var(--muted); }
+.corr.merge { border-color: var(--accent); }
+.corr.adjust { border-color: var(--out); }

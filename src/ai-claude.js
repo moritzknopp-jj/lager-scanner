@@ -39,6 +39,15 @@ export function compactCatalog(products, budget = 140000) {
 }
 const CATALOG_KEYS = 'Catalog keys: c=code (EAN, or own tag code starting with T-), n=name, m=maker, s=series/line, k=category, v=variant, a=article/model number, q=in stock.';
 
+const FIX_KEYS = 'code, name, maker, series, category, variant, color, model, order_number, all_ids, unit, ean_on_photo, confidence, reason';
+const CORR_RULES = `You are the correction agent for the stock list of a German electrical installation company. Check the given products and correct them.
+For each product you get its current data, the text and numbers read from its label, and for some a photo.
+- If the photo or the numbers show what the product is, fill in the exact product (maker, series, article number, order number, all IDs), even when the current entry says "unbekannt" or "kein Produkt gefunden". Read every ID on the photo.
+- ean_on_photo: the EAN/GTIN digits if a barcode or EAN number is visible in the photo, else "". Products whose code is a web address, an own code (T-…) or not a valid EAN should get the real EAN this way when it is visible.
+- Keep fields that are already right; only change what is wrong or missing. Never invent.
+- merges: pairs of codes that are the same article (same maker and article number, or clearly the same product photographed twice). "into" is the entry to keep (prefer a real EAN, then the better-filled entry).
+- reason: one short German sentence per change.`;
+
 const MAKER_HINT = `Almost everything in this stock is from Busch-Jaeger (ABB). Look up Busch-Jaeger first (busch-jaeger.de), then ABB (new.abb.com): their article numbers are the cleanest IDs. Busch-Jaeger article numbers look like "1721-914", "1722-914" or "2006/1 UC-914"; ABB order codes look like "2CKA001725A1558"; Busch-Jaeger GTINs start with 4011395. In article numbers, 1721 = frame 1-fach, 1722 = 2-fach, 1723 = 3-fach, and the suffix is the design and colour (e.g. -914 = Busch-balance SI alpinweiß, -184K = future linear studioweiß).
 Frames (Rahmen): always decide the design line. This company mainly uses Busch-balance SI and future linear. Busch-balance SI: glossy, gently domed surface, softly rounded outer edges and corners. future linear: flat surface with straight, crisp edges and nearly square corners. Others: Reflex SI (strongly rounded, thick), Busch-axcent (flat frame with wide border), solo, carat (glass/metal), Busch-dynasty. If you cannot tell, say so in note.
 Other makers occur: lights and drivers (e.g. EVN, Easylux) usually carry the brand and article number on the label; cables are written like "NYM-J 3x1,5" or "J-Y(St)Y 2x2x0,8" and counted in metres.`;
@@ -146,6 +155,27 @@ Needs lines: ${JSON.stringify(lines.map((l) => ({ line_id: l.id, text: l.text, q
 Reply with only a JSON object: {"matches":[{"line_id","code","confidence":"high|medium|low","reason"}]}.`;
   const r = await call(prompt);
   return Array.isArray(r?.matches) ? r.matches : [];
+}
+
+// ---------- correction agent ----------
+// items: [{ code, current: {...}, image?: Blob }], catalog: compact list of everything (for merges).
+export async function correctBatch({ items, catalog }) {
+  const caps = await capabilities();
+  const photos = caps.images ? items.filter((i) => i.image).slice(0, caps.maxImages || 0) : [];
+  const withPhoto = new Set(photos.map((p) => p.code));
+  const prompt = `${CORR_RULES}
+${MAKER_HINT}
+${FIELDS}
+
+${CATALOG_KEYS}
+Whole catalog (for merges): ${JSON.stringify(catalog)}
+
+Products to check: ${JSON.stringify(items.map((i) => ({ code: i.code, photo: withPhoto.has(i.code), ...i.current })))}
+The attached photos belong to these codes, in this order: ${photos.map((p) => p.code).join(', ') || 'none'}.
+
+Reply with only a JSON object: {"fixes":[{${FIX_KEYS.split(', ').map((k) => '"' + k + '"').join(',')}}],"merges":[{"from","into","reason"}]}. One entry in "fixes" per checked product; confidence is high, medium or low.`;
+  const r = await call(prompt, photos.map((p) => p.image));
+  return { fixes: Array.isArray(r?.fixes) ? r.fixes : [], merges: Array.isArray(r?.merges) ? r.merges : [] };
 }
 
 export function friendlyError(e) {
